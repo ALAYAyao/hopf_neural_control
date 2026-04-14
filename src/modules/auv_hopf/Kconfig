@@ -1,0 +1,5 @@
+menuconfig MODULES_AUV_HOPF
+    bool "auv_hopf"
+    default n
+    ---help---
+        AUV Hopf-TubeMPC composite control module

@@ -37,6 +37,8 @@ cmake_policy(SET CMP0057 NEW)
 include(px4_list_make_absolute)
 
 set(msg_files
+	auv_hopf_status.msg   # <--- 在这里加上你的消息
+
 	ActionRequest.msg
 	ActuatorArmed.msg
 	ActuatorControlsStatus.msg
