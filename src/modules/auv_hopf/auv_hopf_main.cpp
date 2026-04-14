@@ -32,13 +32,18 @@
  * 2. 使用内部状态 x / z 做闭环仿真
  * 3. 后续再根据需要接入真实 PX4 topic
  *
- * 主要数据流：
- *   d_true      = wave_disturbance.step(x, t)
- *   d_hat       = hopf_observer.update(x, tau_prev, dt)
- *   tau_nom     = mpc_optim.solve(z, xref_hor, d_hat)
- *   tau_applied = thruster_allocation.compute(x, z, d_hat, tau_nom)
- *   x_next      = model.step(x, tau_applied, d_true, dt)
- *   z_next      = model.step(z, tau_nom, d_hat, dt)
+ * 主要数据流（当前整改过渡版）：
+ *   d_true       = wave_disturbance.step(x, t)
+ *   d_hat        = hopf_observer.update(x, tau_prev, dt)
+ *   d_hat_hor    = build_disturbance_preview_horizon(d_hat)
+ *   tau_nom      = mpc_optim.solve(z, xref_hor, d_hat_hor)
+ *   tau_applied  = thruster_allocation.compute(x, z, d_hat, tau_nom)
+ *   x_next       = model.step(x, tau_applied, d_true, dt)
+ *   z_next       = model.step(z, tau_nom, d_hat, dt)
+ *
+ * 注意：
+ * - 这里先把“扰动 preview 进入预测层”补齐；
+ * - 第一层 central-path OCP / 第二层真实 ancillary NMPC 仍需后续继续拆分。
  *
  * 说明：
  * - x 为真实状态（actual state）
@@ -109,6 +114,7 @@ private:
 
     // MPC 参考时域缓存
     float _xref_hor[auv::NX * auv::NHOR_MAX]{};
+    float _dhat_hor[auv::NP * auv::NHOR_MAX]{};
     int _xref_nhor{0};
 
     // 调试输出
@@ -118,6 +124,7 @@ private:
     void reset_states();
     void build_reference(float t);
     void build_reference_horizon();
+    void build_disturbance_preview_horizon();
     void publish_debug(float dt);
 
     static float sanitize_dt(float dt);
@@ -164,6 +171,10 @@ void AuvHopf::reset_states()
     _sim_time = 0.0f;
     _last_run = 0;
     _xref_nhor = 0;
+
+    for (int i = 0; i < auv::NP * auv::NHOR_MAX; ++i) {
+        _dhat_hor[i] = 0.0f;
+    }
 
     // -----------------------------
     // 初始真实状态
@@ -268,6 +279,34 @@ void AuvHopf::build_reference_horizon()
     }
 }
 
+void AuvHopf::build_disturbance_preview_horizon()
+{
+    const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
+
+    // 当前先采用 zero-order hold 预览：
+    // 未来每一拍都使用最新 Hopf 估计 d_hat。
+    //
+    // 这一步的目标不是最终论文版预测器，而是先消除
+    // “主链里传 d_zero、预测层完全看不到学习扰动”的结构断点。
+    for (int k = 0; k < auv::NHOR_MAX; ++k) {
+        for (int i = 0; i < auv::NP; ++i) {
+            _dhat_hor[k * auv::NP + i] = 0.0f;
+        }
+    }
+
+    for (int k = 0; k < nh && k < auv::NHOR_MAX; ++k) {
+        _dhat_hor[k * auv::NP + 0] = _d_hat(0);
+        _dhat_hor[k * auv::NP + 1] = _d_hat(1);
+        _dhat_hor[k * auv::NP + 2] = _d_hat(2);
+    }
+
+    for (int k = nh; k < auv::NHOR_MAX; ++k) {
+        _dhat_hor[k * auv::NP + 0] = _dhat_hor[(nh - 1) * auv::NP + 0];
+        _dhat_hor[k * auv::NP + 1] = _dhat_hor[(nh - 1) * auv::NP + 1];
+        _dhat_hor[k * auv::NP + 2] = _dhat_hor[(nh - 1) * auv::NP + 2];
+    }
+}
+
 bool AuvHopf::init()
 {
     const auto plant = auv::default_plant_params();
@@ -351,10 +390,9 @@ void AuvHopf::run()
         _d_hat = _hopf.update(_x, _tau_prev, dt);
 
         // --------------------------------------------------
-        // 4) 用 nominal state z 设置 MPC 初值和时域参考
-        auv::ParamVec d_zero{};
-        d_zero.zero();
-        _mpc.set_reference_horizon(_z, _xref_hor, _xref_nhor, d_zero);
+        // 4) 构造多步扰动预览，并送入预测层
+        build_disturbance_preview_horizon();
+        _mpc.set_reference_horizon_preview(_z, _xref_hor, _dhat_hor, _xref_nhor);
 
         // --------------------------------------------------
         // 5) 求 nominal control
@@ -372,8 +410,13 @@ void AuvHopf::run()
         _x = _model.step(_x, _tau_applied, _d_true, dt);
 
         // --------------------------------------------------
-        // 8) 名义状态推进：nominal state z
-        _z = _model.step(_z, _tau_nom, d_zero, dt);
+        // 8) 过渡版内部预测状态推进
+        //
+        // 说明：
+        // 当前 _mpc 已经开始使用扰动 preview，
+        // 因而这里不再继续用 d_zero 占位，而是同步使用最新 d_hat，
+        // 保持控制器内部状态推进与预测层的一致性。
+        _z = _model.step(_z, _tau_nom, _d_hat, dt);
 
         // --------------------------------------------------
         // 9) 更新上一拍实际执行控制
@@ -448,6 +491,10 @@ int AuvHopf::print_status()
              (double)_tau_applied(0), (double)_tau_applied(1), (double)_tau_applied(2));
 
     PX4_INFO("xref_nhor = %d", _xref_nhor);
+    PX4_INFO("preview0 = [%.3f %.3f %.3f]",
+             (double)_dhat_hor[0],
+             (double)_dhat_hor[1],
+             (double)_dhat_hor[2]);
 
     return 0;
 }
