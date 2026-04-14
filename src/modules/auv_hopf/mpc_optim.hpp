@@ -40,6 +40,7 @@ public:
         double P[auv::NX]{};
 
         double xref_hor[auv::NX * auv::NHOR_MAX]{};
+        double dhat_hor[auv::NP * auv::NHOR_MAX]{};
         int Nhor_ref{2};
     };
 
@@ -69,6 +70,20 @@ public:
                                const float *xref_hor,
                                int nhor,
                                const ParamVec &dhat);
+
+    /**
+     * @brief 设置带多步扰动预览的参考时域
+     *
+     * xref_hor 与 dhat_hor 都按 stage 平铺：
+     *   xref_hor = [x0(0..NX-1), x1(...), ...]
+     *   dhat_hor = [d0(0..NP-1), d1(...), ...]
+     *
+     * 这是当前从“单步 d_hat 占位”过渡到“预测层真实 preview”所需的关键接口。
+     */
+    void set_reference_horizon_preview(const StateVec &z,
+                                       const float *xref_hor,
+                                       const float *dhat_hor,
+                                       int nhor);
 
     InputVec solve();
     void reset();

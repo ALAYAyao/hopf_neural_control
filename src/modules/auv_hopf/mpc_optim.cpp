@@ -49,6 +49,14 @@ static const double *get_xref_terminal(const MpcOptim::UserParam *up)
     return &up->xref_hor[auv::NX * k];
 }
 
+static const double *get_dhat_stage(double t,
+                                    const typeGRAMPCparam *param,
+                                    const MpcOptim::UserParam *up)
+{
+    const int k = get_stage_index(t, param, up);
+    return &up->dhat_hor[auv::NP * k];
+}
+
 } // anonymous namespace
 
 // ======================================================
@@ -98,9 +106,11 @@ void ffct(typeRNum *out,
     const double tau_v = u[1];
     const double tau_r = u[2];
 
-    const double d_u = p[0];
-    const double d_v = p[1];
-    const double d_r = p[2];
+    const double *dhat = get_dhat_stage(t, param, up);
+
+    const double d_u = dhat[0];
+    const double d_v = dhat[1];
+    const double d_r = dhat[2];
 
     const double cpsi = cos(psi);
     const double spsi = sin(psi);
@@ -737,6 +747,10 @@ void MpcOptim::sync_userparam_from_common()
     for (int i = 0; i < auv::NX * auv::NHOR_MAX; ++i) {
         _userparam.xref_hor[i] = 0.0;
     }
+
+    for (int i = 0; i < auv::NP * auv::NHOR_MAX; ++i) {
+        _userparam.dhat_hor[i] = 0.0;
+    }
 }
 
 void MpcOptim::free_grampc()
@@ -865,6 +879,23 @@ void MpcOptim::set_reference_horizon(const StateVec &z,
                                      int nhor,
                                      const ParamVec &dhat)
 {
+    float dhat_hor[auv::NP * auv::NHOR_MAX]{};
+
+    const int nh = clamp_int(nhor, 2, auv::NHOR_MAX);
+    for (int k = 0; k < nh; ++k) {
+        for (int i = 0; i < auv::NP; ++i) {
+            dhat_hor[k * auv::NP + i] = dhat(i);
+        }
+    }
+
+    set_reference_horizon_preview(z, xref_hor, dhat_hor, nh);
+}
+
+void MpcOptim::set_reference_horizon_preview(const StateVec &z,
+                                             const float *xref_hor,
+                                             const float *dhat_hor,
+                                             int nhor)
+{
     if (!_initialized) {
         initialize(0.02f, 0.4f);
     }
@@ -902,13 +933,37 @@ void MpcOptim::set_reference_horizon(const StateVec &z,
         }
     }
 
+    if (dhat_hor != nullptr) {
+        for (int k = 0; k < nh; ++k) {
+            for (int i = 0; i < auv::NP; ++i) {
+                _userparam.dhat_hor[k * auv::NP + i] =
+                    static_cast<double>(dhat_hor[k * auv::NP + i]);
+            }
+        }
+
+        for (int k = nh; k < auv::NHOR_MAX; ++k) {
+            for (int i = 0; i < auv::NP; ++i) {
+                _userparam.dhat_hor[k * auv::NP + i] =
+                    _userparam.dhat_hor[(nh - 1) * auv::NP + i];
+            }
+        }
+    } else {
+        for (int k = 0; k < auv::NHOR_MAX; ++k) {
+            for (int i = 0; i < auv::NP; ++i) {
+                _userparam.dhat_hor[k * auv::NP + i] = 0.0;
+            }
+        }
+    }
+
     for (int i = 0; i < auv::NX; ++i) {
         _grampc->param->xdes[i] =
             _userparam.xref_hor[(nh - 1) * auv::NX + i];
     }
 
+    // 兼容仍然依赖 param->p0 的库内部逻辑：
+    // 这里同步写入第 0 个 preview stage。
     for (int i = 0; i < auv::NP; ++i) {
-        _grampc->param->p0[i] = static_cast<double>(dhat(i));
+        _grampc->param->p0[i] = _userparam.dhat_hor[i];
     }
 
     _grampc->param->t0 = static_cast<double>(_debug.t0);
