@@ -143,6 +143,16 @@ private:
     float _disturbance_residual_norm{0.0f};
     float _preview_update_norm{0.0f};
     float _tube_tracking_error_norm{0.0f};
+    float _tube_value_surrogate{0.0f};
+    float _tube_value_delta{0.0f};
+    float _central_state_violation_norm{0.0f};
+    float _anc_state_violation_norm{0.0f};
+    float _central_input_violation_norm{0.0f};
+    float _anc_input_violation_norm{0.0f};
+    float _physical_clip_norm{0.0f};
+    bool _central_export_ok{false};
+    bool _central_bridge_ok{true};
+    bool _anc_bridge_ok{true};
 
     // 调试输出
     uORB::Publication<auv_hopf_status_s> _status_pub{ORB_ID(auv_hopf_status)};
@@ -166,6 +176,13 @@ private:
     static float wrap_pi(float a);
     static float input_norm(const auv::InputVec &v);
     static float tube_error_norm(const auv::StateVec &x, const auv::StateVec &z);
+    static float state_bound_violation_norm(const auv::StateVec &x,
+                                            const auv::MpcStateBoundsParams &bounds);
+    static float input_bound_violation_norm(const auv::InputVec &u,
+                                            const auv::MpcBoundsParams &bounds);
+    static float quadratic_tracking_value(const auv::StateVec &x,
+                                          const auv::StateVec &z,
+                                          const auv::MpcWeightParams &weights);
 };
 
 AuvHopf::AuvHopf() :
@@ -224,6 +241,68 @@ float AuvHopf::tube_error_norm(const auv::StateVec &x, const auv::StateVec &z)
     return sqrtf(e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3 + e4 * e4 + e5 * e5);
 }
 
+float AuvHopf::state_bound_violation_norm(const auv::StateVec &x,
+                                          const auv::MpcStateBoundsParams &bounds)
+{
+    if (!bounds.enable_soft_bounds) {
+        return 0.0f;
+    }
+
+    float accum = 0.0f;
+
+    for (int i = 0; i < auv::NX; ++i) {
+        float viol = 0.0f;
+
+        if (x(i) < bounds.xmin[i]) {
+            viol = bounds.xmin[i] - x(i);
+        } else if (x(i) > bounds.xmax[i]) {
+            viol = x(i) - bounds.xmax[i];
+        }
+
+        accum += viol * viol;
+    }
+
+    return sqrtf(accum);
+}
+
+float AuvHopf::input_bound_violation_norm(const auv::InputVec &u,
+                                          const auv::MpcBoundsParams &bounds)
+{
+    float accum = 0.0f;
+
+    for (int i = 0; i < auv::NU; ++i) {
+        float viol = 0.0f;
+
+        if (u(i) < bounds.umin[i]) {
+            viol = bounds.umin[i] - u(i);
+        } else if (u(i) > bounds.umax[i]) {
+            viol = u(i) - bounds.umax[i];
+        }
+
+        accum += viol * viol;
+    }
+
+    return sqrtf(accum);
+}
+
+float AuvHopf::quadratic_tracking_value(const auv::StateVec &x,
+                                        const auv::StateVec &z,
+                                        const auv::MpcWeightParams &weights)
+{
+    float value = 0.0f;
+
+    for (int i = 0; i < auv::NX; ++i) {
+        float e = x(i) - z(i);
+        if (i == 2) {
+            e = wrap_pi(e);
+        }
+
+        value += 0.5f * weights.Q[i] * e * e;
+    }
+
+    return value;
+}
+
 float AuvHopf::sanitize_dt(float dt)
 {
     if (!PX4_ISFINITE(dt) || dt <= 0.0f) {
@@ -257,6 +336,16 @@ void AuvHopf::reset_states()
     _disturbance_residual_norm = 0.0f;
     _preview_update_norm = 0.0f;
     _tube_tracking_error_norm = 0.0f;
+    _tube_value_surrogate = 0.0f;
+    _tube_value_delta = 0.0f;
+    _central_state_violation_norm = 0.0f;
+    _anc_state_violation_norm = 0.0f;
+    _central_input_violation_norm = 0.0f;
+    _anc_input_violation_norm = 0.0f;
+    _physical_clip_norm = 0.0f;
+    _central_export_ok = false;
+    _central_bridge_ok = true;
+    _anc_bridge_ok = true;
 
     _central_state_bounds = auv::default_central_state_bounds_params();
     _anc_state_bounds = auv::default_ancillary_state_bounds_params();
@@ -463,7 +552,8 @@ void AuvHopf::build_central_rollout_horizon()
         }
     }
 
-    if (_central_mpc.export_last_solution_horizon(_zref_hor, _vref_hor, nh)) {
+    _central_export_ok = _central_mpc.export_last_solution_horizon(_zref_hor, _vref_hor, nh);
+    if (_central_export_ok) {
         return;
     }
 
@@ -590,6 +680,9 @@ void AuvHopf::run()
         perf_begin(_perf_central_solve);
         _v_central = _central_mpc.solve();
         perf_end(_perf_central_solve);
+        _central_bridge_ok = _central_mpc.debug().bridge_owner_match;
+        _central_input_violation_norm = input_bound_violation_norm(_v_central,
+                                                                   _central_mpc.bounds_params());
 
         // --------------------------------------------------
         // 3) 用 central 输出构造 z* / v* horizon，供第二层使用
@@ -612,6 +705,9 @@ void AuvHopf::run()
         perf_begin(_perf_anc_solve);
         _tau_anc = _anc_mpc.solve();
         perf_end(_perf_anc_solve);
+        _anc_bridge_ok = _anc_mpc.debug().bridge_owner_match;
+        _anc_input_violation_norm = input_bound_violation_norm(_tau_anc,
+                                                               _anc_mpc.bounds_params());
 
         // --------------------------------------------------
         // 5) 执行层（当前过渡版）
@@ -621,6 +717,7 @@ void AuvHopf::run()
         auv::InputVec d_zero{};
         d_zero.zero();
         _tau_applied = _actuator_sat.apply(_tau_anc);
+        _physical_clip_norm = input_norm(_actuator_sat.debug().tau_clip);
 
         // --------------------------------------------------
         // 6) 推进真实状态与 central 状态
@@ -631,6 +728,11 @@ void AuvHopf::run()
         // 7) 记录上一拍实际执行控制
         _tau_prev = _tau_applied;
         _tube_tracking_error_norm = tube_error_norm(_x, _z);
+        const float tube_value_prev = _tube_value_surrogate;
+        _tube_value_surrogate = quadratic_tracking_value(_x, _z, _anc_mpc.weight_params());
+        _tube_value_delta = _tube_value_surrogate - tube_value_prev;
+        _central_state_violation_norm = state_bound_violation_norm(_z, _central_state_bounds);
+        _anc_state_violation_norm = state_bound_violation_norm(_x, _anc_state_bounds);
 
         // --------------------------------------------------
         // 8) 发布调试信息
@@ -695,10 +797,26 @@ int AuvHopf::print_status()
     PX4_INFO("tau_applied = [%.3f %.3f %.3f]",
              (double)_tau_applied(0), (double)_tau_applied(1), (double)_tau_applied(2));
 
-    PX4_INFO("metrics = residual %.3f, preview_delta %.3f, tube_error %.3f",
+    PX4_INFO("metrics = residual %.3f, preview_delta %.3f, tube_error %.3f, tube_value %.3f, tube_dV %.3f",
              (double)_disturbance_residual_norm,
              (double)_preview_update_norm,
-             (double)_tube_tracking_error_norm);
+             (double)_tube_tracking_error_norm,
+             (double)_tube_value_surrogate,
+             (double)_tube_value_delta);
+
+    PX4_INFO("violations = z_state %.3f, x_state %.3f, v_central %.3f, tau_anc %.3f, clip %.3f",
+             (double)_central_state_violation_norm,
+             (double)_anc_state_violation_norm,
+             (double)_central_input_violation_norm,
+             (double)_anc_input_violation_norm,
+             (double)_physical_clip_norm);
+
+    PX4_INFO("solver_guard = central_bridge %d, ancillary_bridge %d, central_export %d, central_stub %d, ancillary_stub %d",
+             _central_bridge_ok ? 1 : 0,
+             _anc_bridge_ok ? 1 : 0,
+             _central_export_ok ? 1 : 0,
+             _central_mpc.debug().rodas_stub_touch_count,
+             _anc_mpc.debug().rodas_stub_touch_count);
 
     PX4_INFO("xref_nhor = %d", _xref_nhor);
     PX4_INFO("preview0 = [%.3f %.3f %.3f]",
@@ -779,6 +897,7 @@ Key property of this version:
 - ancillary layer explicitly tracks z* / v* and uses disturbance preview
 - actuator_saturation is now the dedicated physical layer object
 - runtime parameters are loaded through a named profile bundle: engineering_default or paper_reproduction
+- debug stream now exposes residual / preview-update / tube-value / bound-violation metrics for formal validation
 )DESCR_STR");
 
     PRINT_MODULE_USAGE_NAME("auv_hopf", "template");
@@ -838,6 +957,16 @@ void AuvHopf::publish_debug(float dt)
     publish_scalar_debug("resid", _disturbance_residual_norm);
     publish_scalar_debug("prvupd", _preview_update_norm);
     publish_scalar_debug("tubee", _tube_tracking_error_norm);
+    publish_scalar_debug("tubev", _tube_value_surrogate);
+    publish_scalar_debug("tubedv", _tube_value_delta);
+    publish_scalar_debug("zviol", _central_state_violation_norm);
+    publish_scalar_debug("xviol", _anc_state_violation_norm);
+    publish_scalar_debug("cvu", _central_input_violation_norm);
+    publish_scalar_debug("avu", _anc_input_violation_norm);
+    publish_scalar_debug("clipn", _physical_clip_norm);
+    publish_scalar_debug("cexok", _central_export_ok ? 1.0f : 0.0f);
+    publish_scalar_debug("cbrdg", _central_bridge_ok ? 1.0f : 0.0f);
+    publish_scalar_debug("abrdg", _anc_bridge_ok ? 1.0f : 0.0f);
     publish_scalar_debug("clipu", sat_dbg.tau_clip(0));
     publish_scalar_debug("clipv", sat_dbg.tau_clip(1));
     publish_scalar_debug("clipr", sat_dbg.tau_clip(2));

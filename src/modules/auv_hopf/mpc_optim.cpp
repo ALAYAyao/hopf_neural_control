@@ -12,15 +12,24 @@ namespace
 // 注意：
 // 1) 这里仍然通过全局 g_up 把 C 风格回调绑定到当前实例；
 // 2) 但 solve / set_reference... 会在调用前显式激活所属实例，
-//    因而可以串行复用多个 MpcOptim（例如 central + ancillary）。
+//    因而可以串行复用多个 MpcOptim（例如 central + ancillary）；
+// 3) 为避免模式切换或桥接失配静默失效，增加 owner/id 与 RODAS stub 触发计数。
 // ======================================================
 static MpcOptim::UserParam *g_up = nullptr;
+static uint32_t g_bridge_instance_id = 0;
+static uint32_t g_next_instance_id = 1;
+static int g_rodas_stub_touch_count = 0;
 
 static int clamp_int(int x, int xmin, int xmax)
 {
     if (x < xmin) { return xmin; }
     if (x > xmax) { return xmax; }
     return x;
+}
+
+static void mark_rodas_stub_touched()
+{
+    ++g_rodas_stub_touch_count;
 }
 
 static double soft_state_violation_cost(double x,
@@ -85,12 +94,20 @@ static const double *get_xref_stage(double t,
                                     const typeGRAMPCparam *param,
                                     const MpcOptim::UserParam *up)
 {
+    static const double kZeroXref[auv::NX] = {};
+    if (up == nullptr || param == nullptr) {
+        return kZeroXref;
+    }
     const int k = get_stage_index(t, param, up);
     return &up->xref_hor[auv::NX * k];
 }
 
 static const double *get_xref_terminal(const MpcOptim::UserParam *up)
 {
+    static const double kZeroXref[auv::NX] = {};
+    if (up == nullptr) {
+        return kZeroXref;
+    }
     const int k = clamp_int(up->Nhor_ref - 1, 0, auv::NHOR_MAX - 1);
     return &up->xref_hor[auv::NX * k];
 }
@@ -100,6 +117,10 @@ static const double *get_uref_stage(double t,
                                     const typeGRAMPCparam *param,
                                     const MpcOptim::UserParam *up)
 {
+    static const double kZeroUref[auv::NU] = {};
+    if (up == nullptr || param == nullptr) {
+        return kZeroUref;
+    }
     const int k = get_stage_index(t, param, up);
     return &up->uref_hor[auv::NU * k];
 }
@@ -108,6 +129,10 @@ static const double *get_dhat_stage(double t,
                                     const typeGRAMPCparam *param,
                                     const MpcOptim::UserParam *up)
 {
+    static const double kZeroDhat[auv::NP] = {};
+    if (up == nullptr || param == nullptr) {
+        return kZeroDhat;
+    }
     const int k = get_stage_index(t, param, up);
     return &up->dhat_hor[auv::NP * k];
 }
@@ -705,6 +730,7 @@ void Mfct(typeRNum *out, const typeGRAMPCparam *param, typeUSERPARAM *userparam)
 {
     (void)param;
     (void)userparam;
+    mark_rodas_stub_touched();
 
     // full identity mass matrix, column-wise
     for (int j = 0; j < auv::NX; ++j) {
@@ -716,6 +742,7 @@ void Mfct(typeRNum *out, const typeGRAMPCparam *param, typeUSERPARAM *userparam)
 
 void Mtrans(typeRNum *out, const typeGRAMPCparam *param, typeUSERPARAM *userparam)
 {
+    mark_rodas_stub_touched();
     Mfct(out, param, userparam);
 }
 
@@ -727,6 +754,7 @@ void dfdx(typeRNum *out,
           const typeGRAMPCparam *param,
           typeUSERPARAM *userparam)
 {
+    mark_rodas_stub_touched();
     (void)t;
     (void)x;
     (void)u;
@@ -748,6 +776,7 @@ void dfdxtrans(typeRNum *out,
                const typeGRAMPCparam *param,
                typeUSERPARAM *userparam)
 {
+    mark_rodas_stub_touched();
     (void)t;
     (void)x;
     (void)u;
@@ -769,6 +798,7 @@ void dfdt(typeRNum *out,
           const typeGRAMPCparam *param,
           typeUSERPARAM *userparam)
 {
+    mark_rodas_stub_touched();
     (void)t;
     (void)x;
     (void)u;
@@ -791,6 +821,7 @@ void dHdxdt(typeRNum *out,
             const typeGRAMPCparam *param,
             typeUSERPARAM *userparam)
 {
+    mark_rodas_stub_touched();
     (void)t;
     (void)x;
     (void)lambda;
@@ -828,9 +859,11 @@ MpcOptim::MpcOptim(const auv::AuvPlantParams &plant,
     _weights(weights),
     _bounds(bounds),
     _state_bounds(auv::default_mpc_state_bounds_params()),
-    _config(config)
+    _config(config),
+    _instance_id(g_next_instance_id++)
 {
     _debug.last_u_nom.zero();
+    _debug.instance_id = _instance_id;
 }
 
 int MpcOptim::compute_nhor(double dt, double Thor) const
@@ -899,6 +932,18 @@ void MpcOptim::sync_userparam_from_common()
     }
 }
 
+void MpcOptim::activate_bridge()
+{
+    g_up = &_userparam;
+    g_bridge_instance_id = _instance_id;
+    _debug.bridge_owner_match = true;
+}
+
+bool MpcOptim::bridge_owner_match() const
+{
+    return (g_up == &_userparam) && (g_bridge_instance_id == _instance_id);
+}
+
 void MpcOptim::free_grampc()
 {
     if (_grampc != nullptr) {
@@ -908,10 +953,13 @@ void MpcOptim::free_grampc()
 
     if (g_up == &_userparam) {
         g_up = nullptr;
+        g_bridge_instance_id = 0;
     }
 
     _initialized = false;
     _debug.initialized = false;
+    _debug.bridge_owner_match = true;
+    _debug.last_export_ok = false;
 }
 
 void MpcOptim::initialize(float dt, float Thor)
@@ -930,7 +978,7 @@ void MpcOptim::initialize(float dt, float Thor)
     Thor_use = static_cast<double>(nhor - 1) * dt_use;
 
     _userparam.Nhor_ref = nhor;
-    g_up = &_userparam;
+    activate_bridge();
 
     grampc_init(&_grampc, reinterpret_cast<typeUSERPARAM*>(&_userparam));
 
@@ -973,6 +1021,9 @@ void MpcOptim::initialize(float dt, float Thor)
 
     _initialized = true;
     _debug.initialized = true;
+    _debug.bridge_owner_match = true;
+    _debug.last_export_ok = false;
+    _debug.rodas_stub_touch_count = g_rodas_stub_touch_count;
     _debug.dt = static_cast<float>(dt_use);
     _debug.Thor = static_cast<float>(Thor_use);
     _debug.Nhor = nhor;
@@ -1076,7 +1127,7 @@ void MpcOptim::set_reference_horizon_control_preview(const StateVec &z,
         return;
     }
 
-    g_up = &_userparam;
+    activate_bridge();
 
     const int nh = clamp_int(nhor, 2, auv::NHOR_MAX);
     _userparam.Nhor_ref = nh;
@@ -1170,7 +1221,7 @@ void MpcOptim::set_reference_horizon_control_preview(const StateVec &z,
     _grampc->param->t0 = static_cast<double>(_debug.t0);
 }
 
-void MpcOptim::cache_last_solution_horizon()
+bool MpcOptim::cache_last_solution_horizon()
 {
     _last_solution_nhor = 0;
 
@@ -1183,7 +1234,7 @@ void MpcOptim::cache_last_solution_horizon()
     }
 
     if (!_initialized || _grampc == nullptr || _grampc->rws == nullptr || _grampc->param == nullptr) {
-        return;
+        return false;
     }
 
     const int nh = clamp_int(_debug.Nhor, 2, auv::NHOR_MAX);
@@ -1216,6 +1267,7 @@ void MpcOptim::cache_last_solution_horizon()
     }
 
     _last_solution_nhor = nh;
+    return true;
 }
 
 bool MpcOptim::export_last_solution_horizon(float *x_hor,
@@ -1259,9 +1311,18 @@ MpcOptim::InputVec MpcOptim::solve()
         return out;
     }
 
-    g_up = &_userparam;
+    activate_bridge();
+    const int rodas_count_before = g_rodas_stub_touch_count;
     grampc_run(_grampc);
-    cache_last_solution_horizon();
+    _debug.bridge_owner_match = bridge_owner_match();
+    _debug.last_export_ok = cache_last_solution_horizon();
+    _debug.rodas_stub_touch_count = g_rodas_stub_touch_count;
+
+    if (!_debug.bridge_owner_match || g_rodas_stub_touch_count != rodas_count_before) {
+        out.zero();
+        _debug.last_u_nom = out;
+        return out;
+    }
 
     for (int i = 0; i < auv::NU; ++i) {
         out(i) = static_cast<float>(_grampc->sol->unext[i]);
@@ -1279,6 +1340,9 @@ void MpcOptim::reset()
     sync_userparam_from_common();
     _debug.last_u_nom.zero();
     _debug.t0 = 0.0f;
+    _debug.bridge_owner_match = true;
+    _debug.last_export_ok = false;
+    _debug.rodas_stub_touch_count = g_rodas_stub_touch_count;
 
     _last_solution_nhor = 0;
     for (int i = 0; i < auv::NX * auv::NHOR_MAX; ++i) {

@@ -15,10 +15,14 @@ public:
 
     struct DebugInfo {
         bool initialized{false};
+        bool bridge_owner_match{true};
+        bool last_export_ok{false};
         float dt{0.0f};
         float Thor{0.0f};
         int Nhor{0};
         float t0{0.0f};
+        int rodas_stub_touch_count{0};
+        uint32_t instance_id{0};
         InputVec last_u_nom{};
     };
 
@@ -135,7 +139,9 @@ private:
     void free_grampc();
     void sync_userparam_from_common();
     int compute_nhor(double dt, double Thor) const;
-    void cache_last_solution_horizon();
+    void activate_bridge();
+    bool bridge_owner_match() const;
+    bool cache_last_solution_horizon();
 
 private:
     typeGRAMPC *_grampc{nullptr};
@@ -153,4 +159,5 @@ private:
     float _last_x_hor[auv::NX * auv::NHOR_MAX]{};
     float _last_u_hor[auv::NU * auv::NHOR_MAX]{};
     int _last_solution_nhor{0};
+    uint32_t _instance_id{0};
 };
