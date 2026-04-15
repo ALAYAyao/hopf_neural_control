@@ -8,7 +8,7 @@ px4_add_module(
         hopf_observer.cpp
         wave_disturbance.cpp
         mpc_optim.cpp
-        thruster_allocation.cpp
+        actuator_saturation.cpp
         telem_link.cpp
     INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}

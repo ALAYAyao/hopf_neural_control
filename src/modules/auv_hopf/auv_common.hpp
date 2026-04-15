@@ -261,29 +261,6 @@ enum class ParameterProfile : uint8_t {
  * 这样可以显式区分“论文复现参数组”和“工程默认参数组”，
  * 避免后续主模块继续从不同默认工厂里零散拼装，导致口径漂移。
  */
-struct RuntimeProfileBundle {
-    const char *profile_name;
-
-    AuvPlantParams plant;
-    HopfConfig hopf;
-    WaveEnvParams wave_env;
-    WaveForceModelParams wave_model;
-
-    TubeFeedbackParams tube_feedback;
-    PhysicalActuatorLimits physical_limits;
-    MissionReferenceParams mission_ref;
-    ExperimentConfig experiment;
-
-    MpcWeightParams central_weights;
-    MpcBoundsParams central_bounds;
-    MpcStateBoundsParams central_state_bounds;
-    MpcConfig central_config;
-
-    MpcWeightParams ancillary_weights;
-    MpcBoundsParams ancillary_bounds;
-    MpcStateBoundsParams ancillary_state_bounds;
-    MpcConfig ancillary_config;
-};
 
 // ==================================================
 // MPC / GRAMPC 参数
@@ -351,6 +328,31 @@ struct MpcConfig {
     bool use_terminal_cost;
     bool use_integral_cost;
 };
+
+struct RuntimeProfileBundle {
+    const char *profile_name;
+
+    AuvPlantParams plant;
+    HopfConfig hopf;
+    WaveEnvParams wave_env;
+    WaveForceModelParams wave_model;
+
+    TubeFeedbackParams tube_feedback;
+    PhysicalActuatorLimits physical_limits;
+    MissionReferenceParams mission_ref;
+    ExperimentConfig experiment;
+
+    MpcWeightParams central_weights;
+    MpcBoundsParams central_bounds;
+    MpcStateBoundsParams central_state_bounds;
+    MpcConfig central_config;
+
+    MpcWeightParams ancillary_weights;
+    MpcBoundsParams ancillary_bounds;
+    MpcStateBoundsParams ancillary_state_bounds;
+    MpcConfig ancillary_config;
+};
+
 
 // ==================================================
 // 默认工厂函数
