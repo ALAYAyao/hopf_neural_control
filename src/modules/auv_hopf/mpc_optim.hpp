@@ -42,6 +42,12 @@ public:
         double xref_hor[auv::NX * auv::NHOR_MAX]{};
         double uref_hor[auv::NU * auv::NHOR_MAX]{};
         double dhat_hor[auv::NP * auv::NHOR_MAX]{};
+
+        int use_state_soft_bounds{0};
+        double xmin[auv::NX]{};
+        double xmax[auv::NX]{};
+        double state_penalty[auv::NX]{};
+
         int Nhor_ref{2};
     };
 
@@ -60,11 +66,13 @@ public:
     void set_plant_params(const auv::AuvPlantParams &plant);
     void set_weight_params(const auv::MpcWeightParams &weights);
     void set_bounds_params(const auv::MpcBoundsParams &bounds);
+    void set_state_bounds_params(const auv::MpcStateBoundsParams &bounds);
     void set_mpc_config(const auv::MpcConfig &config);
 
     const auv::AuvPlantParams &plant_params() const { return _plant; }
     const auv::MpcWeightParams &weight_params() const { return _weights; }
     const auv::MpcBoundsParams &bounds_params() const { return _bounds; }
+    const auv::MpcStateBoundsParams &state_bounds_params() const { return _state_bounds; }
     const auv::MpcConfig &config() const { return _config; }
 
     void set_reference_horizon(const StateVec &z,
@@ -135,6 +143,7 @@ private:
     auv::AuvPlantParams _plant{};
     auv::MpcWeightParams _weights{};
     auv::MpcBoundsParams _bounds{};
+    auv::MpcStateBoundsParams _state_bounds{};
     auv::MpcConfig _config{};
 
     UserParam _userparam{};

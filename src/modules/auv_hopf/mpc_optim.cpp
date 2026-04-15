@@ -23,6 +23,48 @@ static int clamp_int(int x, int xmin, int xmax)
     return x;
 }
 
+static double soft_state_violation_cost(double x,
+                                         double xmin,
+                                         double xmax,
+                                         double weight)
+{
+    if (weight <= 0.0) {
+        return 0.0;
+    }
+
+    if (x < xmin) {
+        const double viol = x - xmin;
+        return 0.5 * weight * viol * viol;
+    }
+
+    if (x > xmax) {
+        const double viol = x - xmax;
+        return 0.5 * weight * viol * viol;
+    }
+
+    return 0.0;
+}
+
+static double soft_state_violation_grad(double x,
+                                        double xmin,
+                                        double xmax,
+                                        double weight)
+{
+    if (weight <= 0.0) {
+        return 0.0;
+    }
+
+    if (x < xmin) {
+        return weight * (x - xmin);
+    }
+
+    if (x > xmax) {
+        return weight * (x - xmax);
+    }
+
+    return 0.0;
+}
+
 static double wrap_pi(double a)
 {
     while (a > M_PI)  { a -= 2.0 * M_PI; }
@@ -347,6 +389,13 @@ void lfct(typeRNum *out,
             e = wrap_pi(e);
         }
         cost += 0.5 * up->Q[i] * e * e;
+
+        if (up->use_state_soft_bounds) {
+            cost += soft_state_violation_cost(x[i],
+                                              up->xmin[i],
+                                              up->xmax[i],
+                                              up->state_penalty[i]);
+        }
     }
 
     const double *udes = get_uref_stage(t, param, up);
@@ -380,6 +429,13 @@ void dldx(typeRNum *out,
             e = wrap_pi(e);
         }
         out[i] = up->Q[i] * e;
+
+        if (up->use_state_soft_bounds) {
+            out[i] += soft_state_violation_grad(x[i],
+                                                up->xmin[i],
+                                                up->xmax[i],
+                                                up->state_penalty[i]);
+        }
     }
 }
 
@@ -447,6 +503,13 @@ void Vfct(typeRNum *out,
             e = wrap_pi(e);
         }
         cost += 0.5 * up->P[i] * e * e;
+
+        if (up->use_state_soft_bounds) {
+            cost += soft_state_violation_cost(x[i],
+                                              up->xmin[i],
+                                              up->xmax[i],
+                                              up->state_penalty[i]);
+        }
     }
 
     *out = cost;
@@ -473,6 +536,13 @@ void dVdx(typeRNum *out,
             e = wrap_pi(e);
         }
         out[i] = up->P[i] * e;
+
+        if (up->use_state_soft_bounds) {
+            out[i] += soft_state_violation_grad(x[i],
+                                                up->xmin[i],
+                                                up->xmax[i],
+                                                up->state_penalty[i]);
+        }
     }
 }
 
@@ -757,6 +827,7 @@ MpcOptim::MpcOptim(const auv::AuvPlantParams &plant,
     _plant(plant),
     _weights(weights),
     _bounds(bounds),
+    _state_bounds(auv::default_mpc_state_bounds_params()),
     _config(config)
 {
     _debug.last_u_nom.zero();
@@ -818,6 +889,13 @@ void MpcOptim::sync_userparam_from_common()
 
     for (int i = 0; i < auv::NP * auv::NHOR_MAX; ++i) {
         _userparam.dhat_hor[i] = 0.0;
+    }
+
+    _userparam.use_state_soft_bounds = _state_bounds.enable_soft_bounds ? 1 : 0;
+    for (int i = 0; i < auv::NX; ++i) {
+        _userparam.xmin[i] = static_cast<double>(_state_bounds.xmin[i]);
+        _userparam.xmax[i] = static_cast<double>(_state_bounds.xmax[i]);
+        _userparam.state_penalty[i] = static_cast<double>(_state_bounds.penalty[i]);
     }
 }
 
@@ -942,6 +1020,15 @@ void MpcOptim::set_bounds_params(const auv::MpcBoundsParams &bounds)
             _grampc->param->pmin[i] = static_cast<double>(_bounds.pmin[i]);
             _grampc->param->pmax[i] = static_cast<double>(_bounds.pmax[i]);
         }
+    }
+}
+
+void MpcOptim::set_state_bounds_params(const auv::MpcStateBoundsParams &bounds)
+{
+    _state_bounds = bounds;
+
+    if (_initialized) {
+        sync_userparam_from_common();
     }
 }
 

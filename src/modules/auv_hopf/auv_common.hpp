@@ -245,6 +245,25 @@ struct MpcBoundsParams {
 };
 
 /**
+ * @brief MPC 软状态边界与罚函数配置
+ *
+ * 说明：
+ * 1. 当前位置版本先把状态边界显式送进优化代价，而不是只留在文档里；
+ * 2. 由于当前 GRAMPC 接口仍采用无显式 h/g 约束配置，这里先使用 soft-constraint 方式；
+ * 3. 这样可以先把 nominal / ancillary 的状态安全边界真正区分出来，
+ *    后续若切到显式不等式约束，可在保持参数口径不变的前提下升级实现。
+ */
+struct MpcStateBoundsParams {
+    bool enable_soft_bounds;
+
+    float xmin[NX];
+    float xmax[NX];
+
+    // 对越界量 0.5 * w_i * viol_i^2 计入阶段/终端代价
+    float penalty[NX];
+};
+
+/**
  * @brief MPC 求解器配置
  */
 struct MpcConfig {
@@ -436,6 +455,197 @@ inline TubeFeedbackParams default_tube_feedback_params()
     p.tau_r_max_phys = 10.0f;
 
     return p;
+}
+
+inline MpcWeightParams default_central_mpc_weight_params()
+{
+    MpcWeightParams w{};
+
+    const float q[NX] = {2000.0f, 2000.0f, 1000.0f, 0.2f, 0.2f, 0.2f};
+    const float r[NU] = {0.1f, 0.1f, 0.1f};
+    const float p[NX] = {2000.0f, 2000.0f, 1000.0f, 0.2f, 0.2f, 0.2f};
+
+    for (int i = 0; i < NX; ++i) {
+        w.Q[i] = q[i];
+        w.P[i] = p[i];
+    }
+
+    for (int i = 0; i < NU; ++i) {
+        w.R[i] = r[i];
+    }
+
+    return w;
+}
+
+inline MpcWeightParams default_ancillary_mpc_weight_params()
+{
+    MpcWeightParams w{};
+
+    // ancillary 层相对更关注贴近 z*，同时不过度惩罚控制修正
+    const float q[NX] = {2600.0f, 2600.0f, 1400.0f, 0.5f, 0.5f, 0.5f};
+    const float r[NU] = {0.08f, 0.08f, 0.08f};
+    const float p[NX] = {2600.0f, 2600.0f, 1400.0f, 0.5f, 0.5f, 0.5f};
+
+    for (int i = 0; i < NX; ++i) {
+        w.Q[i] = q[i];
+        w.P[i] = p[i];
+    }
+
+    for (int i = 0; i < NU; ++i) {
+        w.R[i] = r[i];
+    }
+
+    return w;
+}
+
+inline MpcBoundsParams default_central_mpc_bounds_params()
+{
+    MpcBoundsParams b{};
+
+    // central-path 采用 tightened nominal input set V，为 ancillary 留出调节余量
+    b.umin[0] = -28.0f;
+    b.umin[1] = -28.0f;
+    b.umin[2] =  -7.0f;
+
+    b.umax[0] =  28.0f;
+    b.umax[1] =  28.0f;
+    b.umax[2] =   7.0f;
+
+    b.pmin[0] = -100.0f;
+    b.pmin[1] = -100.0f;
+    b.pmin[2] =  -50.0f;
+
+    b.pmax[0] =  100.0f;
+    b.pmax[1] =  100.0f;
+    b.pmax[2] =   50.0f;
+
+    return b;
+}
+
+inline MpcBoundsParams default_ancillary_mpc_bounds_params()
+{
+    MpcBoundsParams b{};
+
+    // ancillary 层可比 nominal 层更宽，但仍保留到物理限幅之前的一层余量
+    b.umin[0] = -40.0f;
+    b.umin[1] = -40.0f;
+    b.umin[2] =  -9.0f;
+
+    b.umax[0] =  40.0f;
+    b.umax[1] =  40.0f;
+    b.umax[2] =   9.0f;
+
+    b.pmin[0] = -100.0f;
+    b.pmin[1] = -100.0f;
+    b.pmin[2] =  -50.0f;
+
+    b.pmax[0] =  100.0f;
+    b.pmax[1] =  100.0f;
+    b.pmax[2] =   50.0f;
+
+    return b;
+}
+
+inline MpcStateBoundsParams default_mpc_state_bounds_params()
+{
+    MpcStateBoundsParams b{};
+    b.enable_soft_bounds = false;
+
+    for (int i = 0; i < NX; ++i) {
+        b.xmin[i] = -1.0e6f;
+        b.xmax[i] =  1.0e6f;
+        b.penalty[i] = 0.0f;
+    }
+
+    return b;
+}
+
+inline MpcStateBoundsParams default_central_state_bounds_params()
+{
+    MpcStateBoundsParams b = default_mpc_state_bounds_params();
+    b.enable_soft_bounds = true;
+
+    // X/Y 当前不做位置盒约束；先显式约束与安全更直接相关的姿态与速度
+    b.penalty[0] = 0.0f;
+    b.penalty[1] = 0.0f;
+
+    b.xmin[2] = -2.70f;
+    b.xmax[2] =  2.70f;
+    b.penalty[2] = 1200.0f;
+
+    b.xmin[3] = -2.40f;
+    b.xmax[3] =  2.40f;
+    b.penalty[3] = 220.0f;
+
+    b.xmin[4] = -2.40f;
+    b.xmax[4] =  2.40f;
+    b.penalty[4] = 220.0f;
+
+    b.xmin[5] = -1.60f;
+    b.xmax[5] =  1.60f;
+    b.penalty[5] = 180.0f;
+
+    return b;
+}
+
+inline MpcStateBoundsParams default_ancillary_state_bounds_params()
+{
+    MpcStateBoundsParams b = default_mpc_state_bounds_params();
+    b.enable_soft_bounds = true;
+
+    b.penalty[0] = 0.0f;
+    b.penalty[1] = 0.0f;
+
+    b.xmin[2] = -2.95f;
+    b.xmax[2] =  2.95f;
+    b.penalty[2] = 1800.0f;
+
+    b.xmin[3] = -2.80f;
+    b.xmax[3] =  2.80f;
+    b.penalty[3] = 320.0f;
+
+    b.xmin[4] = -2.80f;
+    b.xmax[4] =  2.80f;
+    b.penalty[4] = 320.0f;
+
+    b.xmin[5] = -1.85f;
+    b.xmax[5] =  1.85f;
+    b.penalty[5] = 260.0f;
+
+    return b;
+}
+
+inline MpcConfig default_central_mpc_config()
+{
+    MpcConfig cfg{};
+
+    cfg.dt = 0.1f;
+    cfg.Thor = 1.0f;
+    cfg.Nhor = 11;
+    cfg.MaxGradIter = 2;
+    cfg.MaxMultIter = 1;
+    cfg.shift_control = true;
+    cfg.use_terminal_cost = true;
+    cfg.use_integral_cost = true;
+
+    return cfg;
+}
+
+inline MpcConfig default_ancillary_mpc_config()
+{
+    MpcConfig cfg{};
+
+    // 当前先保持同采样周期/时域长度，后续可独立加快 ancillary 频率。
+    cfg.dt = 0.1f;
+    cfg.Thor = 1.0f;
+    cfg.Nhor = 11;
+    cfg.MaxGradIter = 2;
+    cfg.MaxMultIter = 1;
+    cfg.shift_control = true;
+    cfg.use_terminal_cost = true;
+    cfg.use_integral_cost = true;
+
+    return cfg;
 }
 
 inline MpcWeightParams default_mpc_weight_params()

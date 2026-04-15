@@ -125,6 +125,11 @@ private:
     float _dzero_hor[auv::NP * auv::NHOR_MAX]{};
     int _xref_nhor{0};
 
+    // 分层约束缓存：
+    // nominal central layer / ancillary layer / physical layer
+    auv::MpcStateBoundsParams _central_state_bounds{};
+    auv::MpcStateBoundsParams _anc_state_bounds{};
+
     // 调试输出
     uORB::Publication<auv_hopf_status_s> _status_pub{ORB_ID(auv_hopf_status)};
 
@@ -135,9 +140,13 @@ private:
     void build_disturbance_preview_horizon();
     void build_zero_disturbance_horizon();
     void build_central_rollout_horizon();
+    void clamp_state_horizon_to_bounds(float *x_hor,
+                                       int nhor,
+                                       const auv::MpcStateBoundsParams &bounds);
     void publish_debug(float dt);
 
     static float sanitize_dt(float dt);
+    static float clampf(float v, float lo, float hi);
 };
 
 AuvHopf::AuvHopf() :
@@ -151,6 +160,19 @@ AuvHopf::~AuvHopf()
     perf_free(_perf_central_solve);
     perf_free(_perf_anc_solve);
     perf_free(_perf_total_run);
+}
+
+float AuvHopf::clampf(float v, float lo, float hi)
+{
+    if (v < lo) {
+        return lo;
+    }
+
+    if (v > hi) {
+        return hi;
+    }
+
+    return v;
 }
 
 float AuvHopf::sanitize_dt(float dt)
@@ -184,6 +206,9 @@ void AuvHopf::reset_states()
     _last_run = 0;
     _xref_nhor = 0;
 
+    _central_state_bounds = auv::default_central_state_bounds_params();
+    _anc_state_bounds = auv::default_ancillary_state_bounds_params();
+
     for (int i = 0; i < auv::NX * auv::NHOR_MAX; ++i) {
         _mission_hor[i] = 0.0f;
         _zref_hor[i] = 0.0f;
@@ -211,8 +236,6 @@ void AuvHopf::reset_states()
 
     _wave.reset();
     _hopf.reset();
-    _central_mpc.reset();
-    _anc_mpc.reset();
 }
 
 /**
@@ -289,6 +312,8 @@ void AuvHopf::build_mission_reference_horizon()
         _mission_hor[k * auv::NX + 4] = v_r;
         _mission_hor[k * auv::NX + 5] = r_r;
     }
+
+    clamp_state_horizon_to_bounds(_mission_hor, _xref_nhor, _central_state_bounds);
 }
 
 void AuvHopf::build_disturbance_preview_horizon()
@@ -321,6 +346,29 @@ void AuvHopf::build_zero_disturbance_horizon()
     for (int k = 0; k < auv::NHOR_MAX; ++k) {
         for (int i = 0; i < auv::NP; ++i) {
             _dzero_hor[k * auv::NP + i] = 0.0f;
+        }
+    }
+}
+
+void AuvHopf::clamp_state_horizon_to_bounds(float *x_hor,
+                                            int nhor,
+                                            const auv::MpcStateBoundsParams &bounds)
+{
+    if (x_hor == nullptr || !bounds.enable_soft_bounds) {
+        return;
+    }
+
+    const int nh = (nhor < 2) ? 2 : ((nhor > auv::NHOR_MAX) ? auv::NHOR_MAX : nhor);
+
+    for (int k = 0; k < nh; ++k) {
+        for (int i = 0; i < auv::NX; ++i) {
+            if (bounds.penalty[i] <= 0.0f) {
+                continue;
+            }
+
+            x_hor[k * auv::NX + i] = clampf(x_hor[k * auv::NX + i],
+                                            bounds.xmin[i],
+                                            bounds.xmax[i]);
         }
     }
 }
@@ -378,6 +426,8 @@ void AuvHopf::build_central_rollout_horizon()
             _vref_hor[k * auv::NU + i] = _vref_hor[(nh - 1) * auv::NU + i];
         }
     }
+
+    clamp_state_horizon_to_bounds(_zref_hor, nh, _central_state_bounds);
 }
 
 bool AuvHopf::init()
@@ -387,9 +437,16 @@ bool AuvHopf::init()
     const auto wave_env = auv::default_wave_env_params();
     const auto wave_model = auv::default_wave_force_model_params();
     const auto tube = auv::default_tube_feedback_params();
-    const auto mpc_w = auv::default_mpc_weight_params();
-    const auto mpc_b = auv::default_mpc_bounds_params();
-    const auto mpc_c = auv::default_mpc_config();
+
+    const auto central_w = auv::default_central_mpc_weight_params();
+    const auto central_b = auv::default_central_mpc_bounds_params();
+    const auto central_xb = auv::default_central_state_bounds_params();
+    const auto central_c = auv::default_central_mpc_config();
+
+    const auto anc_w = auv::default_ancillary_mpc_weight_params();
+    const auto anc_b = auv::default_ancillary_mpc_bounds_params();
+    const auto anc_xb = auv::default_ancillary_state_bounds_params();
+    const auto anc_c = auv::default_ancillary_mpc_config();
 
     _model.set_plant_params(plant);
 
@@ -402,17 +459,22 @@ bool AuvHopf::init()
     _alloc.set_plant_params(plant);
     _alloc.set_params(tube);
 
+    _central_state_bounds = central_xb;
+    _anc_state_bounds = anc_xb;
+
     _central_mpc.set_plant_params(plant);
-    _central_mpc.set_weight_params(mpc_w);
-    _central_mpc.set_bounds_params(mpc_b);
-    _central_mpc.set_mpc_config(mpc_c);
-    _central_mpc.initialize(mpc_c.dt, mpc_c.Thor);
+    _central_mpc.set_weight_params(central_w);
+    _central_mpc.set_bounds_params(central_b);
+    _central_mpc.set_state_bounds_params(central_xb);
+    _central_mpc.set_mpc_config(central_c);
+    _central_mpc.initialize(central_c.dt, central_c.Thor);
 
     _anc_mpc.set_plant_params(plant);
-    _anc_mpc.set_weight_params(mpc_w);
-    _anc_mpc.set_bounds_params(mpc_b);
-    _anc_mpc.set_mpc_config(mpc_c);
-    _anc_mpc.initialize(mpc_c.dt, mpc_c.Thor);
+    _anc_mpc.set_weight_params(anc_w);
+    _anc_mpc.set_bounds_params(anc_b);
+    _anc_mpc.set_state_bounds_params(anc_xb);
+    _anc_mpc.set_mpc_config(anc_c);
+    _anc_mpc.initialize(anc_c.dt, anc_c.Thor);
 
     reset_states();
 
