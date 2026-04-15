@@ -212,6 +212,79 @@ struct TubeFeedbackParams {
     float tau_r_max_phys;
 };
 
+
+/**
+ * @brief 执行层物理限幅参数
+ *
+ * 与 TubeFeedbackParams 拆开保存，避免“反馈器参数”和“执行器硬限幅”继续绑在一起。
+ */
+struct PhysicalActuatorLimits {
+    float tau_u_min;
+    float tau_u_max;
+
+    float tau_v_min;
+    float tau_v_max;
+
+    float tau_r_min;
+    float tau_r_max;
+};
+
+/**
+ * @brief 任务层参考轨迹参数
+ */
+struct MissionReferenceParams {
+    float circle_radius;
+    float circle_omega;
+};
+
+/**
+ * @brief 运行实验配置
+ */
+struct ExperimentConfig {
+    float sim_time_limit;
+};
+
+/**
+ * @brief 参数口径分组
+ *
+ * EngineeringDefault: 面向当前工程原型迭代。
+ * PaperReproduction: 面向论文复现实验口径。
+ */
+enum class ParameterProfile : uint8_t {
+    EngineeringDefault = 0,
+    PaperReproduction = 1,
+};
+
+/**
+ * @brief 主模块一次性装载的参数包
+ *
+ * 这样可以显式区分“论文复现参数组”和“工程默认参数组”，
+ * 避免后续主模块继续从不同默认工厂里零散拼装，导致口径漂移。
+ */
+struct RuntimeProfileBundle {
+    const char *profile_name;
+
+    AuvPlantParams plant;
+    HopfConfig hopf;
+    WaveEnvParams wave_env;
+    WaveForceModelParams wave_model;
+
+    TubeFeedbackParams tube_feedback;
+    PhysicalActuatorLimits physical_limits;
+    MissionReferenceParams mission_ref;
+    ExperimentConfig experiment;
+
+    MpcWeightParams central_weights;
+    MpcBoundsParams central_bounds;
+    MpcStateBoundsParams central_state_bounds;
+    MpcConfig central_config;
+
+    MpcWeightParams ancillary_weights;
+    MpcBoundsParams ancillary_bounds;
+    MpcStateBoundsParams ancillary_state_bounds;
+    MpcConfig ancillary_config;
+};
+
 // ==================================================
 // MPC / GRAMPC 参数
 // ==================================================
@@ -457,6 +530,84 @@ inline TubeFeedbackParams default_tube_feedback_params()
     return p;
 }
 
+inline PhysicalActuatorLimits default_physical_actuator_limits()
+{
+    PhysicalActuatorLimits p{};
+
+    p.tau_u_min = -50.0f;
+    p.tau_u_max =  50.0f;
+
+    p.tau_v_min = -50.0f;
+    p.tau_v_max =  50.0f;
+
+    p.tau_r_min = -10.0f;
+    p.tau_r_max =  10.0f;
+
+    return p;
+}
+
+inline PhysicalActuatorLimits paper_reproduction_physical_actuator_limits()
+{
+    PhysicalActuatorLimits p{};
+
+    p.tau_u_min = -50.0f;
+    p.tau_u_max =  50.0f;
+
+    p.tau_v_min = -50.0f;
+    p.tau_v_max =  50.0f;
+
+    // 论文当前给出的物理 yaw 力矩限幅为 ±20
+    p.tau_r_min = -20.0f;
+    p.tau_r_max =  20.0f;
+
+    return p;
+}
+
+inline MissionReferenceParams default_mission_reference_params()
+{
+    MissionReferenceParams p{};
+    p.circle_radius = 30.0f;
+    p.circle_omega  = 0.02f;
+    return p;
+}
+
+inline MissionReferenceParams paper_reproduction_mission_reference_params()
+{
+    MissionReferenceParams p{};
+    p.circle_radius = 20.0f;
+    p.circle_omega  = 0.05f;
+    return p;
+}
+
+inline ExperimentConfig default_experiment_config()
+{
+    ExperimentConfig cfg{};
+    cfg.sim_time_limit = 300.0f;
+    return cfg;
+}
+
+inline ExperimentConfig paper_reproduction_experiment_config()
+{
+    ExperimentConfig cfg{};
+    cfg.sim_time_limit = 60.0f;
+    return cfg;
+}
+
+inline AuvPlantParams paper_reproduction_plant_params()
+{
+    AuvPlantParams p{};
+
+    p.m_u = 70.0f;
+    p.m_v = 75.0f;
+    p.Iz  = 12.501f;
+
+    p.Du  = 15.919f;
+    p.Dv  = 20.218f;
+    p.Dr  = 10.4501f;
+
+    return p;
+}
+
 inline MpcWeightParams default_central_mpc_weight_params()
 {
     MpcWeightParams w{};
@@ -646,6 +797,126 @@ inline MpcConfig default_ancillary_mpc_config()
     cfg.use_integral_cost = true;
 
     return cfg;
+}
+
+inline MpcBoundsParams paper_reproduction_central_mpc_bounds_params()
+{
+    MpcBoundsParams b{};
+
+    // 论文给出 nominal tightened bounds = physical - margin
+    // 这里对应 [50, 50, 20] - [15, 15, 10] = [35, 35, 10]
+    b.umin[0] = -35.0f;
+    b.umin[1] = -35.0f;
+    b.umin[2] = -10.0f;
+
+    b.umax[0] =  35.0f;
+    b.umax[1] =  35.0f;
+    b.umax[2] =  10.0f;
+
+    b.pmin[0] = -100.0f;
+    b.pmin[1] = -100.0f;
+    b.pmin[2] =  -50.0f;
+
+    b.pmax[0] =  100.0f;
+    b.pmax[1] =  100.0f;
+    b.pmax[2] =   50.0f;
+
+    return b;
+}
+
+inline MpcBoundsParams paper_reproduction_ancillary_mpc_bounds_params()
+{
+    MpcBoundsParams b = paper_reproduction_central_mpc_bounds_params();
+
+    // 当前实现里 ancillary 层仍保留一层接近物理限幅的可调空间；
+    // 论文参数尚未把这一层单独展开，因此这里采用保守近物理配置。
+    b.umin[0] = -45.0f;
+    b.umin[1] = -45.0f;
+    b.umin[2] = -18.0f;
+
+    b.umax[0] =  45.0f;
+    b.umax[1] =  45.0f;
+    b.umax[2] =  18.0f;
+
+    return b;
+}
+
+inline RuntimeProfileBundle make_engineering_default_profile_bundle()
+{
+    RuntimeProfileBundle bundle{};
+    bundle.profile_name = "engineering_default";
+
+    bundle.plant = default_plant_params();
+    bundle.hopf = default_hopf_config();
+    bundle.wave_env = default_wave_env_params();
+    bundle.wave_model = default_wave_force_model_params();
+
+    bundle.tube_feedback = default_tube_feedback_params();
+    bundle.physical_limits = default_physical_actuator_limits();
+    bundle.mission_ref = default_mission_reference_params();
+    bundle.experiment = default_experiment_config();
+
+    bundle.central_weights = default_central_mpc_weight_params();
+    bundle.central_bounds = default_central_mpc_bounds_params();
+    bundle.central_state_bounds = default_central_state_bounds_params();
+    bundle.central_config = default_central_mpc_config();
+
+    bundle.ancillary_weights = default_ancillary_mpc_weight_params();
+    bundle.ancillary_bounds = default_ancillary_mpc_bounds_params();
+    bundle.ancillary_state_bounds = default_ancillary_state_bounds_params();
+    bundle.ancillary_config = default_ancillary_mpc_config();
+
+    return bundle;
+}
+
+inline RuntimeProfileBundle make_paper_reproduction_profile_bundle()
+{
+    RuntimeProfileBundle bundle{};
+    bundle.profile_name = "paper_reproduction";
+
+    bundle.plant = paper_reproduction_plant_params();
+    bundle.hopf = default_hopf_config();
+    bundle.wave_env = default_wave_env_params();
+    bundle.wave_model = default_wave_force_model_params();
+
+    bundle.tube_feedback = default_tube_feedback_params();
+    bundle.physical_limits = paper_reproduction_physical_actuator_limits();
+    bundle.mission_ref = paper_reproduction_mission_reference_params();
+    bundle.experiment = paper_reproduction_experiment_config();
+
+    bundle.central_weights = default_central_mpc_weight_params();
+    bundle.central_bounds = paper_reproduction_central_mpc_bounds_params();
+    bundle.central_state_bounds = default_central_state_bounds_params();
+    bundle.central_config = default_central_mpc_config();
+
+    bundle.ancillary_weights = default_ancillary_mpc_weight_params();
+    bundle.ancillary_bounds = paper_reproduction_ancillary_mpc_bounds_params();
+    bundle.ancillary_state_bounds = default_ancillary_state_bounds_params();
+    bundle.ancillary_config = default_ancillary_mpc_config();
+
+    return bundle;
+}
+
+inline const char *parameter_profile_name(ParameterProfile profile)
+{
+    switch (profile) {
+    case ParameterProfile::PaperReproduction:
+        return "paper_reproduction";
+    case ParameterProfile::EngineeringDefault:
+    default:
+        return "engineering_default";
+    }
+}
+
+inline RuntimeProfileBundle make_runtime_profile_bundle(ParameterProfile profile)
+{
+    switch (profile) {
+    case ParameterProfile::PaperReproduction:
+        return make_paper_reproduction_profile_bundle();
+    case ParameterProfile::EngineeringDefault:
+    default:
+        return make_engineering_default_profile_bundle();
+    }
 }
 
 inline MpcWeightParams default_mpc_weight_params()

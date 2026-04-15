@@ -19,7 +19,7 @@
 #include "hopf_observer.hpp"
 #include "wave_disturbance.hpp"
 #include "mpc_optim.hpp"
-#include "thruster_allocation.hpp"
+#include "actuator_saturation.hpp"
 #include "telem_link.hpp"
 
 /**
@@ -41,7 +41,7 @@
  *   z_hor, v_hor    = central_mpc.export_last_solution_horizon(...)
  *
  *   tau_anc         = ancillary_mpc.solve(x, z_hor, v_hor, d_hat_hor)
- *   tau_applied     = thruster_allocation.compute(x, x, 0, tau_anc)
+ *   tau_applied     = actuator_saturation.apply(tau_anc)
  *
  *   x_next          = model.step(x, tau_applied, d_true, dt)
  *   z_next          = model.step(z, v_central, 0, dt)
@@ -51,7 +51,8 @@
  * - 它现在只是 mission reference，真正的第一层由 central_mpc 在线生成；
  * - 第二层现在优先使用第一层最近一次求解导出的整条 z* / v* 时域；
  * - 若导出失败，才退回到近似前向滚动兜底；
- * - 执行层仍暂时借用 thruster_allocation 做物理限幅，真正 allocation 拆分后续再做。
+ * - 执行层现在显式使用 actuator_saturation，thruster_allocation 不再承担控制器语义。
+ * - 参数初始化改为通过 profile bundle 一次性装载，正式区分 paper_reproduction 与 engineering_default。
  */
 
 class AuvHopf :
@@ -83,7 +84,7 @@ private:
     WaveDisturbance _wave;
     MpcOptim _central_mpc;
     MpcOptim _anc_mpc;
-    ThrusterAllocation _alloc;
+    ActuatorSaturation _actuator_sat;
     TelemLink _telem{"/dev/ttyS1"};
 
     //----------------------------------------------
@@ -130,8 +131,22 @@ private:
     auv::MpcStateBoundsParams _central_state_bounds{};
     auv::MpcStateBoundsParams _anc_state_bounds{};
 
+    // 参数口径与任务配置
+    static constexpr auv::ParameterProfile kParameterProfile = auv::ParameterProfile::EngineeringDefault;
+    const char *_parameter_profile_name{auv::parameter_profile_name(kParameterProfile)};
+    auv::MissionReferenceParams _mission_ref_params{};
+    auv::ExperimentConfig _experiment_cfg{};
+    auv::PhysicalActuatorLimits _physical_limits{};
+
+    // 理论-实现对应的在线指标
+    float _dhat_prev_hor[auv::NP * auv::NHOR_MAX]{};
+    float _disturbance_residual_norm{0.0f};
+    float _preview_update_norm{0.0f};
+    float _tube_tracking_error_norm{0.0f};
+
     // 调试输出
     uORB::Publication<auv_hopf_status_s> _status_pub{ORB_ID(auv_hopf_status)};
+    uORB::Publication<debug_key_value_s> _debug_key_value_pub{ORB_ID(debug_key_value)};
 
     // 内部帮助函数
     void reset_states();
@@ -144,9 +159,13 @@ private:
                                        int nhor,
                                        const auv::MpcStateBoundsParams &bounds);
     void publish_debug(float dt);
+    void publish_scalar_debug(const char *key, float value);
 
     static float sanitize_dt(float dt);
     static float clampf(float v, float lo, float hi);
+    static float wrap_pi(float a);
+    static float input_norm(const auv::InputVec &v);
+    static float tube_error_norm(const auv::StateVec &x, const auv::StateVec &z);
 };
 
 AuvHopf::AuvHopf() :
@@ -173,6 +192,36 @@ float AuvHopf::clampf(float v, float lo, float hi)
     }
 
     return v;
+}
+
+float AuvHopf::wrap_pi(float a)
+{
+    while (a > M_PI_F) {
+        a -= 2.0f * M_PI_F;
+    }
+
+    while (a < -M_PI_F) {
+        a += 2.0f * M_PI_F;
+    }
+
+    return a;
+}
+
+float AuvHopf::input_norm(const auv::InputVec &v)
+{
+    return sqrtf(v(0) * v(0) + v(1) * v(1) + v(2) * v(2));
+}
+
+float AuvHopf::tube_error_norm(const auv::StateVec &x, const auv::StateVec &z)
+{
+    const float e0 = x(0) - z(0);
+    const float e1 = x(1) - z(1);
+    const float e2 = wrap_pi(x(2) - z(2));
+    const float e3 = x(3) - z(3);
+    const float e4 = x(4) - z(4);
+    const float e5 = x(5) - z(5);
+
+    return sqrtf(e0 * e0 + e1 * e1 + e2 * e2 + e3 * e3 + e4 * e4 + e5 * e5);
 }
 
 float AuvHopf::sanitize_dt(float dt)
@@ -205,6 +254,9 @@ void AuvHopf::reset_states()
     _sim_time = 0.0f;
     _last_run = 0;
     _xref_nhor = 0;
+    _disturbance_residual_norm = 0.0f;
+    _preview_update_norm = 0.0f;
+    _tube_tracking_error_norm = 0.0f;
 
     _central_state_bounds = auv::default_central_state_bounds_params();
     _anc_state_bounds = auv::default_ancillary_state_bounds_params();
@@ -220,6 +272,7 @@ void AuvHopf::reset_states()
 
     for (int i = 0; i < auv::NP * auv::NHOR_MAX; ++i) {
         _dhat_hor[i] = 0.0f;
+        _dhat_prev_hor[i] = 0.0f;
         _dzero_hor[i] = 0.0f;
     }
 
@@ -248,8 +301,8 @@ void AuvHopf::reset_states()
  */
 void AuvHopf::build_mission_reference(float t)
 {
-    const float R = 30.0f;
-    const float w = 0.02f;
+    const float R = _mission_ref_params.circle_radius;
+    const float w = _mission_ref_params.circle_omega;
 
     const float xr = R * cosf(w * t);
     const float yr = R * sinf(w * t);
@@ -291,8 +344,8 @@ void AuvHopf::build_mission_reference_horizon()
     for (int k = 0; k < _xref_nhor && k < auv::NHOR_MAX; ++k) {
         const float tk = _sim_time + static_cast<float>(k) * dt;
 
-        const float R = 30.0f;
-        const float w = 0.02f;
+        const float R = _mission_ref_params.circle_radius;
+        const float w = _mission_ref_params.circle_omega;
 
         const float xr = R * cosf(w * tk);
         const float yr = R * sinf(w * tk);
@@ -338,6 +391,21 @@ void AuvHopf::build_disturbance_preview_horizon()
         _dhat_hor[k * auv::NP + 0] = _dhat_hor[(nh - 1) * auv::NP + 0];
         _dhat_hor[k * auv::NP + 1] = _dhat_hor[(nh - 1) * auv::NP + 1];
         _dhat_hor[k * auv::NP + 2] = _dhat_hor[(nh - 1) * auv::NP + 2];
+    }
+
+    _preview_update_norm = 0.0f;
+    for (int k = 0; k < nh && k < auv::NHOR_MAX; ++k) {
+        const float du = _dhat_hor[k * auv::NP + 0] - _dhat_prev_hor[k * auv::NP + 0];
+        const float dv = _dhat_hor[k * auv::NP + 1] - _dhat_prev_hor[k * auv::NP + 1];
+        const float dr = _dhat_hor[k * auv::NP + 2] - _dhat_prev_hor[k * auv::NP + 2];
+        const float delta = sqrtf(du * du + dv * dv + dr * dr);
+        if (delta > _preview_update_norm) {
+            _preview_update_norm = delta;
+        }
+    }
+
+    for (int i = 0; i < auv::NP * auv::NHOR_MAX; ++i) {
+        _dhat_prev_hor[i] = _dhat_hor[i];
     }
 }
 
@@ -432,55 +500,45 @@ void AuvHopf::build_central_rollout_horizon()
 
 bool AuvHopf::init()
 {
-    const auto plant = auv::default_plant_params();
-    const auto hopf_cfg = auv::default_hopf_config();
-    const auto wave_env = auv::default_wave_env_params();
-    const auto wave_model = auv::default_wave_force_model_params();
-    const auto tube = auv::default_tube_feedback_params();
+    const auto bundle = auv::make_runtime_profile_bundle(kParameterProfile);
 
-    const auto central_w = auv::default_central_mpc_weight_params();
-    const auto central_b = auv::default_central_mpc_bounds_params();
-    const auto central_xb = auv::default_central_state_bounds_params();
-    const auto central_c = auv::default_central_mpc_config();
+    _parameter_profile_name = bundle.profile_name;
+    _mission_ref_params = bundle.mission_ref;
+    _experiment_cfg = bundle.experiment;
+    _physical_limits = bundle.physical_limits;
 
-    const auto anc_w = auv::default_ancillary_mpc_weight_params();
-    const auto anc_b = auv::default_ancillary_mpc_bounds_params();
-    const auto anc_xb = auv::default_ancillary_state_bounds_params();
-    const auto anc_c = auv::default_ancillary_mpc_config();
+    _model.set_plant_params(bundle.plant);
 
-    _model.set_plant_params(plant);
+    _hopf.set_plant_params(bundle.plant);
+    _hopf.set_hopf_config(bundle.hopf);
 
-    _hopf.set_plant_params(plant);
-    _hopf.set_hopf_config(hopf_cfg);
+    _wave.set_wave_env(bundle.wave_env);
+    _wave.set_model_params(bundle.wave_model);
 
-    _wave.set_wave_env(wave_env);
-    _wave.set_model_params(wave_model);
+    _actuator_sat.set_limits(bundle.physical_limits);
 
-    _alloc.set_plant_params(plant);
-    _alloc.set_params(tube);
+    _central_state_bounds = bundle.central_state_bounds;
+    _anc_state_bounds = bundle.ancillary_state_bounds;
 
-    _central_state_bounds = central_xb;
-    _anc_state_bounds = anc_xb;
+    _central_mpc.set_plant_params(bundle.plant);
+    _central_mpc.set_weight_params(bundle.central_weights);
+    _central_mpc.set_bounds_params(bundle.central_bounds);
+    _central_mpc.set_state_bounds_params(bundle.central_state_bounds);
+    _central_mpc.set_mpc_config(bundle.central_config);
+    _central_mpc.initialize(bundle.central_config.dt, bundle.central_config.Thor);
 
-    _central_mpc.set_plant_params(plant);
-    _central_mpc.set_weight_params(central_w);
-    _central_mpc.set_bounds_params(central_b);
-    _central_mpc.set_state_bounds_params(central_xb);
-    _central_mpc.set_mpc_config(central_c);
-    _central_mpc.initialize(central_c.dt, central_c.Thor);
-
-    _anc_mpc.set_plant_params(plant);
-    _anc_mpc.set_weight_params(anc_w);
-    _anc_mpc.set_bounds_params(anc_b);
-    _anc_mpc.set_state_bounds_params(anc_xb);
-    _anc_mpc.set_mpc_config(anc_c);
-    _anc_mpc.initialize(anc_c.dt, anc_c.Thor);
+    _anc_mpc.set_plant_params(bundle.plant);
+    _anc_mpc.set_weight_params(bundle.ancillary_weights);
+    _anc_mpc.set_bounds_params(bundle.ancillary_bounds);
+    _anc_mpc.set_state_bounds_params(bundle.ancillary_state_bounds);
+    _anc_mpc.set_mpc_config(bundle.ancillary_config);
+    _anc_mpc.initialize(bundle.ancillary_config.dt, bundle.ancillary_config.Thor);
 
     reset_states();
 
     _telem.init();
 
-    PX4_INFO("auv_hopf started");
+    PX4_INFO("auv_hopf started, profile=%s", _parameter_profile_name);
     return true;
 }
 
@@ -511,6 +569,7 @@ void AuvHopf::run()
 
         _d_true = _wave.step(_x, _sim_time);
         _d_hat  = _hopf.update(_x, _tau_prev, dt);
+        _disturbance_residual_norm = input_norm(_d_true - _d_hat);
 
         build_disturbance_preview_horizon();
         build_zero_disturbance_horizon();
@@ -561,7 +620,7 @@ void AuvHopf::run()
         // “第二层 controller”职责。
         auv::InputVec d_zero{};
         d_zero.zero();
-        _tau_applied = _alloc.compute(_x, _x, d_zero, _tau_anc);
+        _tau_applied = _actuator_sat.apply(_tau_anc);
 
         // --------------------------------------------------
         // 6) 推进真实状态与 central 状态
@@ -571,6 +630,7 @@ void AuvHopf::run()
         // --------------------------------------------------
         // 7) 记录上一拍实际执行控制
         _tau_prev = _tau_applied;
+        _tube_tracking_error_norm = tube_error_norm(_x, _z);
 
         // --------------------------------------------------
         // 8) 发布调试信息
@@ -580,8 +640,8 @@ void AuvHopf::run()
 
         hrt_abstime now = hrt_absolute_time();
 
-        if (_sim_time >= 300.0f) {
-            PX4_INFO("时间到！已运行 300 秒，算法自动安全退出。");
+        if (_sim_time >= _experiment_cfg.sim_time_limit) {
+            PX4_INFO("时间到！已运行 %.1f 秒，算法自动安全退出。", (double)_experiment_cfg.sim_time_limit);
             request_stop();
         }
 
@@ -597,6 +657,7 @@ void AuvHopf::run()
 int AuvHopf::print_status()
 {
     PX4_INFO("running");
+    PX4_INFO("profile = %s", _parameter_profile_name);
     PX4_INFO("t = %.3f", (double)_sim_time);
 
     PX4_INFO("x = [%.3f %.3f %.3f %.3f %.3f %.3f]",
@@ -633,6 +694,11 @@ int AuvHopf::print_status()
 
     PX4_INFO("tau_applied = [%.3f %.3f %.3f]",
              (double)_tau_applied(0), (double)_tau_applied(1), (double)_tau_applied(2));
+
+    PX4_INFO("metrics = residual %.3f, preview_delta %.3f, tube_error %.3f",
+             (double)_disturbance_residual_norm,
+             (double)_preview_update_norm,
+             (double)_tube_tracking_error_norm);
 
     PX4_INFO("xref_nhor = %d", _xref_nhor);
     PX4_INFO("preview0 = [%.3f %.3f %.3f]",
@@ -711,7 +777,8 @@ Key property of this version:
 - mission reference is no longer treated as the central path itself
 - central state z is generated by a dedicated nominal OCP
 - ancillary layer explicitly tracks z* / v* and uses disturbance preview
-- thruster_allocation is temporarily retained only as the physical saturation layer
+- actuator_saturation is now the dedicated physical layer object
+- runtime parameters are loaded through a named profile bundle: engineering_default or paper_reproduction
 )DESCR_STR");
 
     PRINT_MODULE_USAGE_NAME("auv_hopf", "template");
@@ -758,15 +825,32 @@ void AuvHopf::publish_debug(float dt)
     msg.hopf_yaw[1] = hopf_dbg.yaw.d_pred_before;
     msg.hopf_yaw[2] = hopf_dbg.yaw.f_error;
 
-    const auto &alloc_dbg = _alloc.debug();
+    const auto &sat_dbg = _actuator_sat.debug();
     for (int i = 0; i < 3; ++i) {
-        msg.tau_fb[i]        = alloc_dbg.tau_fb(i);
+        msg.tau_fb[i]        = 0.0f;
         msg.tau_ancillary[i] = _tau_anc(i);
-        msg.tau_raw[i]       = alloc_dbg.tau_raw(i);
+        msg.tau_raw[i]       = sat_dbg.tau_cmd(i);
     }
 
     msg.xref_nhor = static_cast<uint8_t>(_xref_nhor);
     _status_pub.publish(msg);
+
+    publish_scalar_debug("resid", _disturbance_residual_norm);
+    publish_scalar_debug("prvupd", _preview_update_norm);
+    publish_scalar_debug("tubee", _tube_tracking_error_norm);
+    publish_scalar_debug("clipu", sat_dbg.tau_clip(0));
+    publish_scalar_debug("clipv", sat_dbg.tau_clip(1));
+    publish_scalar_debug("clipr", sat_dbg.tau_clip(2));
+}
+
+void AuvHopf::publish_scalar_debug(const char *key, float value)
+{
+    debug_key_value_s msg{};
+    msg.timestamp = hrt_absolute_time();
+    msg.value = value;
+    strncpy(msg.key, key, sizeof(msg.key) - 1);
+    msg.key[sizeof(msg.key) - 1] = '\0';
+    _debug_key_value_pub.publish(msg);
 }
 
 ModuleBase::Descriptor AuvHopf::desc{
