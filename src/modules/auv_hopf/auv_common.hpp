@@ -773,8 +773,9 @@ inline MpcConfig default_central_mpc_config()
     MpcConfig cfg{};
 
     cfg.dt = 0.1f;
-    cfg.Thor = 1.0f;
-    cfg.Nhor = 11;
+    cfg.Thor = 5.0f;
+    cfg.Nhor = 51;
+
     cfg.MaxGradIter = 2;
     cfg.MaxMultIter = 1;
     cfg.shift_control = true;
@@ -983,5 +984,6 @@ inline MpcConfig default_mpc_config()
 
     return cfg;
 }
+
 
 } // namespace auv

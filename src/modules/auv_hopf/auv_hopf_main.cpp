@@ -119,6 +119,12 @@ private:
     hrt_abstime _last_run{0};
     float _sim_time{0.0f};
 
+    // 第一层低频重规划调度
+    static constexpr float kCentralReplanPeriod = 5.0f;
+    int  _central_replan_steps{1};        // 5s 对应多少个 ancillary tick
+    int  _central_ticks_since_replan{0};  // 距上次第一层重规划已过多少拍
+    bool _central_plan_valid{false};      // 当前缓存的 5s central 计划是否有效
+
     // 时域缓存
     float _mission_hor[auv::NX * auv::NHOR_MAX]{};
     float _zref_hor[auv::NX * auv::NHOR_MAX]{};
@@ -168,6 +174,23 @@ private:
     void build_disturbance_preview_horizon();
     void build_zero_disturbance_horizon();
     void build_central_rollout_horizon();
+
+    bool need_central_replan() const;
+    void shift_central_plan_one_stage();
+    void sync_nominal_from_plan_head();
+
+    static auv::StateVec mission_reference_at(float t,
+                                              const auv::MissionReferenceParams &params);
+    static void zero_horizon_buffer(float *buf, int total_len);
+    static void shift_horizon_left(float *buf, int nhor, int dim);
+    static void hold_last_stage(float *buf, int nhor, int dim);
+    static void configure_mpc(MpcOptim &mpc,
+                              const auv::AuvPlantParams &plant,
+                              const auv::MpcWeightParams &weights,
+                              const auv::MpcBoundsParams &bounds,
+                              const auv::MpcStateBoundsParams &state_bounds,
+                              const auv::MpcConfig &config);
+
     void clamp_state_horizon_to_bounds(float *x_hor,
                                        int nhor,
                                        const auv::MpcStateBoundsParams &bounds);
@@ -306,6 +329,91 @@ float AuvHopf::quadratic_tracking_value(const auv::StateVec &x,
     return value;
 }
 
+auv::StateVec AuvHopf::mission_reference_at(float t,
+                                            const auv::MissionReferenceParams &params)
+{
+    const float R = params.circle_radius;
+    const float w = params.circle_omega;
+
+    const float xr = R * cosf(w * t);
+    const float yr = R * sinf(w * t);
+
+    const float xdot_r = -R * w * sinf(w * t);
+    const float ydot_r =  R * w * cosf(w * t);
+
+    auv::StateVec xref{};
+    xref.zero();
+    xref(0) = xr;
+    xref(1) = yr;
+    xref(2) = atan2f(ydot_r, xdot_r);
+    xref(3) = R * w;
+    xref(4) = 0.0f;
+    xref(5) = w;
+
+    return xref;
+}
+
+void AuvHopf::zero_horizon_buffer(float *buf, int total_len)
+{
+    if (buf == nullptr || total_len <= 0) {
+        return;
+    }
+
+    for (int i = 0; i < total_len; ++i) {
+        buf[i] = 0.0f;
+    }
+}
+
+void AuvHopf::shift_horizon_left(float *buf, int nhor, int dim)
+{
+    if (buf == nullptr || nhor < 2 || dim < 1) {
+        return;
+    }
+
+    for (int k = 0; k < nhor - 1; ++k) {
+        for (int i = 0; i < dim; ++i) {
+            buf[k * dim + i] = buf[(k + 1) * dim + i];
+        }
+    }
+}
+
+void AuvHopf::hold_last_stage(float *buf, int nhor, int dim)
+{
+    if (buf == nullptr || nhor < 2 || dim < 1) {
+        return;
+    }
+
+    for (int i = 0; i < dim; ++i) {
+        buf[(nhor - 1) * dim + i] = buf[(nhor - 2) * dim + i];
+    }
+}
+
+void AuvHopf::configure_mpc(MpcOptim &mpc,
+                            const auv::AuvPlantParams &plant,
+                            const auv::MpcWeightParams &weights,
+                            const auv::MpcBoundsParams &bounds,
+                            const auv::MpcStateBoundsParams &state_bounds,
+                            const auv::MpcConfig &config)
+{
+    mpc.set_plant_params(plant);
+    mpc.set_weight_params(weights);
+    mpc.set_bounds_params(bounds);
+    mpc.set_state_bounds_params(state_bounds);
+    mpc.set_mpc_config(config);
+    mpc.initialize(config.dt, config.Thor);
+}
+
+void AuvHopf::sync_nominal_from_plan_head()
+{
+    for (int i = 0; i < auv::NX; ++i) {
+        _z(i) = _zref_hor[i];
+    }
+
+    for (int i = 0; i < auv::NU; ++i) {
+        _v_central(i) = _vref_hor[i];
+    }
+}
+
 float AuvHopf::sanitize_dt(float dt)
 {
     if (!PX4_ISFINITE(dt) || dt <= 0.0f) {
@@ -336,6 +444,10 @@ void AuvHopf::reset_states()
     _sim_time = 0.0f;
     _last_run = 0;
     _xref_nhor = 0;
+
+    _central_ticks_since_replan = 0;
+    _central_plan_valid = false;
+
     _disturbance_residual_norm = 0.0f;
     _preview_update_norm = 0.0f;
     _preview_span_norm = 0.0f;
@@ -352,31 +464,13 @@ void AuvHopf::reset_states()
     _central_bridge_ok = true;
     _anc_bridge_ok = true;
 
-    _central_state_bounds = auv::default_central_state_bounds_params();
-    _anc_state_bounds = auv::default_ancillary_state_bounds_params();
 
-    for (int i = 0; i < auv::NX * auv::NHOR_MAX; ++i) {
-        _mission_hor[i] = 0.0f;
-        _zref_hor[i] = 0.0f;
-    }
-
-    for (int i = 0; i < auv::NU * auv::NHOR_MAX; ++i) {
-        _vref_hor[i] = 0.0f;
-    }
-
-    for (int i = 0; i < auv::NP * auv::NHOR_MAX; ++i) {
-        _dhat_hor[i] = 0.0f;
-        _dhat_prev_hor[i] = 0.0f;
-        _dzero_hor[i] = 0.0f;
-    }
-
-    // 初始真实状态
-    _x(0) = 0.0f;
-    _x(1) = 0.0f;
-    _x(2) = 0.0f;
-    _x(3) = 0.0f;
-    _x(4) = 0.0f;
-    _x(5) = 0.0f;
+    zero_horizon_buffer(_mission_hor, auv::NX * auv::NHOR_MAX);
+    zero_horizon_buffer(_zref_hor, auv::NX * auv::NHOR_MAX);
+    zero_horizon_buffer(_vref_hor, auv::NU * auv::NHOR_MAX);
+    zero_horizon_buffer(_dhat_hor, auv::NP * auv::NHOR_MAX);
+    zero_horizon_buffer(_dhat_prev_hor, auv::NP * auv::NHOR_MAX);
+    zero_horizon_buffer(_dzero_hor, auv::NP * auv::NHOR_MAX);
 
     // 初始名义状态
     _z = _x;
@@ -395,27 +489,7 @@ void AuvHopf::reset_states()
  */
 void AuvHopf::build_mission_reference(float t)
 {
-    const float R = _mission_ref_params.circle_radius;
-    const float w = _mission_ref_params.circle_omega;
-
-    const float xr = R * cosf(w * t);
-    const float yr = R * sinf(w * t);
-
-    const float xdot_r = -R * w * sinf(w * t);
-    const float ydot_r =  R * w * cosf(w * t);
-
-    const float psi_r = atan2f(ydot_r, xdot_r);
-    const float u_r = R * w;
-    const float v_r = 0.0f;
-    const float r_r = w;
-
-    _xref.zero();
-    _xref(0) = xr;
-    _xref(1) = yr;
-    _xref(2) = psi_r;
-    _xref(3) = u_r;
-    _xref(4) = v_r;
-    _xref(5) = r_r;
+    _xref = mission_reference_at(t, _mission_ref_params);
 }
 
 /**
@@ -429,35 +503,15 @@ void AuvHopf::build_mission_reference_horizon()
     _xref_nhor = (_central_mpc.horizon_length() > 0) ? _central_mpc.horizon_length() : 20;
     const float dt = (_central_mpc.sample_time() > 0.0f) ? _central_mpc.sample_time() : 0.02f;
 
-    for (int k = 0; k < auv::NHOR_MAX; ++k) {
-        for (int i = 0; i < auv::NX; ++i) {
-            _mission_hor[k * auv::NX + i] = 0.0f;
-        }
-    }
+    zero_horizon_buffer(_mission_hor, auv::NX * auv::NHOR_MAX);
 
     for (int k = 0; k < _xref_nhor && k < auv::NHOR_MAX; ++k) {
         const float tk = _sim_time + static_cast<float>(k) * dt;
+        const auv::StateVec xref_k = mission_reference_at(tk, _mission_ref_params);
 
-        const float R = _mission_ref_params.circle_radius;
-        const float w = _mission_ref_params.circle_omega;
-
-        const float xr = R * cosf(w * tk);
-        const float yr = R * sinf(w * tk);
-
-        const float xdot_r = -R * w * sinf(w * tk);
-        const float ydot_r =  R * w * cosf(w * tk);
-
-        const float psi_r = atan2f(ydot_r, xdot_r);
-        const float u_r = R * w;
-        const float v_r = 0.0f;
-        const float r_r = w;
-
-        _mission_hor[k * auv::NX + 0] = xr;
-        _mission_hor[k * auv::NX + 1] = yr;
-        _mission_hor[k * auv::NX + 2] = psi_r;
-        _mission_hor[k * auv::NX + 3] = u_r;
-        _mission_hor[k * auv::NX + 4] = v_r;
-        _mission_hor[k * auv::NX + 5] = r_r;
+        for (int i = 0; i < auv::NX; ++i) {
+            _mission_hor[k * auv::NX + i] = xref_k(i);
+        }
     }
 
     clamp_state_horizon_to_bounds(_mission_hor, _xref_nhor, _central_state_bounds);
@@ -518,11 +572,7 @@ void AuvHopf::build_disturbance_preview_horizon()
 
 void AuvHopf::build_zero_disturbance_horizon()
 {
-    for (int k = 0; k < auv::NHOR_MAX; ++k) {
-        for (int i = 0; i < auv::NP; ++i) {
-            _dzero_hor[k * auv::NP + i] = 0.0f;
-        }
-    }
+    zero_horizon_buffer(_dzero_hor, auv::NP * auv::NHOR_MAX);
 }
 
 void AuvHopf::clamp_state_horizon_to_bounds(float *x_hor,
@@ -560,15 +610,8 @@ void AuvHopf::build_central_rollout_horizon()
 {
     const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
 
-    for (int k = 0; k < auv::NHOR_MAX; ++k) {
-        for (int i = 0; i < auv::NX; ++i) {
-            _zref_hor[k * auv::NX + i] = 0.0f;
-        }
-
-        for (int i = 0; i < auv::NU; ++i) {
-            _vref_hor[k * auv::NU + i] = 0.0f;
-        }
-    }
+    zero_horizon_buffer(_zref_hor, auv::NX * auv::NHOR_MAX);
+    zero_horizon_buffer(_vref_hor, auv::NU * auv::NHOR_MAX);
 
     _central_export_ok = _central_mpc.export_last_solution_horizon(_zref_hor, _vref_hor, nh);
     if (_central_export_ok) {
@@ -606,6 +649,24 @@ void AuvHopf::build_central_rollout_horizon()
     clamp_state_horizon_to_bounds(_zref_hor, nh, _central_state_bounds);
 }
 
+bool AuvHopf::need_central_replan() const
+{
+    return (!_central_plan_valid) || (_central_ticks_since_replan >= _central_replan_steps);
+}
+
+void AuvHopf::shift_central_plan_one_stage()
+{
+    const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
+
+    shift_horizon_left(_zref_hor, nh, auv::NX);
+    shift_horizon_left(_vref_hor, nh, auv::NU);
+
+    hold_last_stage(_zref_hor, nh, auv::NX);
+    hold_last_stage(_vref_hor, nh, auv::NU);
+
+    sync_nominal_from_plan_head();
+}
+
 bool AuvHopf::init()
 {
     const auto bundle = auv::make_runtime_profile_bundle(kParameterProfile);
@@ -628,21 +689,28 @@ bool AuvHopf::init()
     _central_state_bounds = bundle.central_state_bounds;
     _anc_state_bounds = bundle.ancillary_state_bounds;
 
-    _central_mpc.set_plant_params(bundle.plant);
-    _central_mpc.set_weight_params(bundle.central_weights);
-    _central_mpc.set_bounds_params(bundle.central_bounds);
-    _central_mpc.set_state_bounds_params(bundle.central_state_bounds);
-    _central_mpc.set_mpc_config(bundle.central_config);
-    _central_mpc.initialize(bundle.central_config.dt, bundle.central_config.Thor);
+    configure_mpc(_central_mpc,
+                  bundle.plant,
+                  bundle.central_weights,
+                  bundle.central_bounds,
+                  bundle.central_state_bounds,
+                  bundle.central_config);
 
-    _anc_mpc.set_plant_params(bundle.plant);
-    _anc_mpc.set_weight_params(bundle.ancillary_weights);
-    _anc_mpc.set_bounds_params(bundle.ancillary_bounds);
-    _anc_mpc.set_state_bounds_params(bundle.ancillary_state_bounds);
-    _anc_mpc.set_mpc_config(bundle.ancillary_config);
-    _anc_mpc.initialize(bundle.ancillary_config.dt, bundle.ancillary_config.Thor);
+    configure_mpc(_anc_mpc,
+                  bundle.plant,
+                  bundle.ancillary_weights,
+                  bundle.ancillary_bounds,
+                  bundle.ancillary_state_bounds,
+                  bundle.ancillary_config);
 
     reset_states();
+
+    _central_replan_steps =
+        static_cast<int>(kCentralReplanPeriod / sanitize_dt(_anc_mpc.sample_time()) + 0.5f);
+
+    if (_central_replan_steps < 1) {
+        _central_replan_steps = 1;
+    }
 
     _telem.init();
 
@@ -657,7 +725,7 @@ void AuvHopf::run()
         return;
     }
 
-    float dt = (_central_mpc.sample_time() > 0.0f) ? _central_mpc.sample_time() : 0.02f;
+    float dt = (_anc_mpc.sample_time() > 0.0f) ? _anc_mpc.sample_time() : 0.02f;
     dt = sanitize_dt(dt);
     const hrt_abstime dt_us = static_cast<hrt_abstime>(dt * 1e6f);
 
@@ -666,15 +734,13 @@ void AuvHopf::run()
     while (!should_exit()) {
 
         next_run_time += dt_us;
-
         perf_begin(_perf_total_run);
         _sim_time += dt;
 
-        // --------------------------------------------------
-        // 1) 构造 mission reference 与外扰 / 学习器输出
+        // 1) 始终更新当前 mission 点（调试/显示）
         build_mission_reference(_sim_time);
-        build_mission_reference_horizon();
 
+        // 2) 始终更新真实扰动 / Hopf 学习 / preview
         _d_true = _wave.step(_x, _sim_time);
         _d_hat  = _hopf.update(_x, _tau_prev, dt);
         _disturbance_residual_norm = input_norm(_d_true - _d_hat);
@@ -682,37 +748,37 @@ void AuvHopf::run()
         build_disturbance_preview_horizon();
         build_zero_disturbance_horizon();
 
-        // --------------------------------------------------
-        // 2) 第一层：central-path OCP
-        //
-        // 目标：
-        //   z, v 由 nominal OCP 追 mission reference 生成；
-        //   这里显式不注入 Hopf preview，保持第一层干净。
-        _central_mpc.set_reference_horizon_control_preview(
-            _z,
-            _mission_hor,
-            nullptr,
-            _dzero_hor,
-            _xref_nhor);
+        // 3) 第一层只在“到点”时重规划
+        if (need_central_replan()) {
 
-        perf_begin(_perf_central_solve);
-        _v_central = _central_mpc.solve();
-        perf_end(_perf_central_solve);
-        _central_bridge_ok = _central_mpc.debug().bridge_owner_match;
-        _central_input_violation_norm = input_bound_violation_norm(_v_central,
-                                                                   _central_mpc.bounds_params());
+            build_mission_reference_horizon();
 
-        // --------------------------------------------------
-        // 3) 用 central 输出构造 z* / v* horizon，供第二层使用
-        build_central_rollout_horizon();
+            // 关键：从实际位置 x 重规划，不再从旧 z 重规划
+            _central_mpc.set_reference_horizon_control_preview(
+                _x,
+                _mission_hor,
+                nullptr,
+                _dzero_hor,
+                _xref_nhor);
 
-        // --------------------------------------------------
-        // 4) 第二层：Hopf-augmented ancillary MPC
-        //
-        // 当前第二层使用：
-        //   xref = z* horizon
-        //   uref = v* horizon
-        //   p    = d_hat preview
+            perf_begin(_perf_central_solve);
+            _v_central = _central_mpc.solve();
+            perf_end(_perf_central_solve);
+
+            _central_bridge_ok = _central_mpc.debug().bridge_owner_match;
+            _central_input_violation_norm =
+                input_bound_violation_norm(_v_central, _central_mpc.bounds_params());
+
+            build_central_rollout_horizon();   // 导出当前 5 s 计划到 _zref_hor/_vref_hor
+
+            // 当前名义点直接取缓存计划首点
+            sync_nominal_from_plan_head();
+
+            _central_plan_valid = true;
+            _central_ticks_since_replan = 0;
+        }
+
+        // 4) 第二层每拍都跟踪当前缓存计划
         _anc_mpc.set_reference_horizon_control_preview(
             _x,
             _zref_hor,
@@ -723,27 +789,23 @@ void AuvHopf::run()
         perf_begin(_perf_anc_solve);
         _tau_anc = _anc_mpc.solve();
         perf_end(_perf_anc_solve);
-        _anc_bridge_ok = _anc_mpc.debug().bridge_owner_match;
-        _anc_input_violation_norm = input_bound_violation_norm(_tau_anc,
-                                                               _anc_mpc.bounds_params());
 
-        // --------------------------------------------------
-        // 5) 执行层（当前过渡版）
-        //
-        // 先借用 thruster_allocation 只做物理限幅，不再让它承担
-        // “第二层 controller”职责。
-        auv::InputVec d_zero{};
-        d_zero.zero();
+        _anc_bridge_ok = _anc_mpc.debug().bridge_owner_match;
+        _anc_input_violation_norm =
+            input_bound_violation_norm(_tau_anc, _anc_mpc.bounds_params());
+
+        // 5) 执行层
         _tau_applied = _actuator_sat.apply(_tau_anc);
         _physical_clip_norm = input_norm(_actuator_sat.debug().tau_clip);
 
-        // --------------------------------------------------
-        // 6) 推进真实状态与 central 状态
+        // 6) 推进真实状态
         _x = _model.step(_x, _tau_applied, _d_true, dt);
-        _z = _model.step(_z, _v_central, d_zero, dt);
 
-        // --------------------------------------------------
-        // 7) 记录上一拍实际执行控制
+        // 7) 消费掉 central 计划的一个 stage
+        shift_central_plan_one_stage();
+        ++_central_ticks_since_replan;
+
+        // 8) 记录与调试
         _tau_prev = _tau_applied;
         _tube_tracking_error_norm = tube_error_norm(_x, _z);
         const float tube_value_prev = _tube_value_surrogate;
