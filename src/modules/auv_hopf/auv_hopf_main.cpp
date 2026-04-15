@@ -50,7 +50,7 @@
  * - 手工圆轨迹不再直接扮演第一层 nominal trajectory；
  * - 它现在只是 mission reference，真正的第一层由 central_mpc 在线生成；
  * - 第二层现在优先使用第一层最近一次求解导出的整条 z* / v* 时域；
- * - Hopf 扰动预览不再使用 ZOH 平铺，而是由当前振子组在 preview horizon 上自主前滚生成；
+ * - Hopf 扰动预览不再使用 ZOH 平铺；它由当前已学得的振子内模状态在短预测域上做信号外推生成；
  * - 若 central 时域导出失败，才退回到近似前向滚动兜底；
  * - 执行层现在显式使用 actuator_saturation，thruster_allocation 不再承担控制器语义。
  * - 参数初始化改为通过 profile bundle 一次性装载，正式区分 paper_reproduction 与 engineering_default。
@@ -474,9 +474,11 @@ void AuvHopf::build_disturbance_preview_horizon()
         }
     }
 
-    // 优先使用 Hopf 振子组的自主前滚预览：
-    //   d_hat[k+i|k] 由“当前已学习到的振子状态”在未来地平线上自主演化得到，
-    //   而不是简单把当前一步估计做 ZOH 平铺。
+    // 优先使用 Hopf 内模的短时信号外推：
+    //   d_hat[k+i|k] 不是“已知未来海况后的真扰动预测”，
+    //   而是把当前已学得的振子内模状态复制出来，在短预测域上做自主前滚，
+    //   从而得到供第二层使用的外生扰动预览序列。
+    //   真实海浪—AUV 耦合中未被该内模捕获的部分，仍由 residual / tube 机制吸收。
     _hopf_preview_ok = _hopf.predict_horizon(_dhat_hor, nh, dt_preview);
 
     if (!_hopf_preview_ok) {

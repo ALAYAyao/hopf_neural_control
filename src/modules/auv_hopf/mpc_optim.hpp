@@ -91,7 +91,7 @@ public:
      *   xref_hor = [x0(0..NX-1), x1(...), ...]
      *   dhat_hor = [d0(0..NP-1), d1(...), ...]
      *
-     * 这是当前从“单步 d_hat 占位”过渡到“预测层真实 preview”所需的关键接口。
+     * 这是当前从“单步 d_hat 占位”过渡到“预测层外生短时预览”所需的关键接口。
      */
     void set_reference_horizon_preview(const StateVec &z,
                                        const float *xref_hor,
@@ -109,7 +109,7 @@ public:
      * 对 ancillary NMPC：
      *   xref_hor = z* horizon
      *   uref_hor = v* horizon
-     *   dhat_hor = d_hat[k+i|k]
+     *   dhat_hor = d_hat[k+i|k] （由已学得 Hopf 内模状态短时外推得到）
      */
     void set_reference_horizon_control_preview(const StateVec &z,
                                                const float *xref_hor,

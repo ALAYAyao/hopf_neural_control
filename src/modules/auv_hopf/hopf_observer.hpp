@@ -34,6 +34,16 @@ public:
     void set_hopf_config(const auv::HopfConfig &hopf_cfg);
 
     InputVec update(const StateVec &x, const InputVec &tau_prev, float Ts);
+
+    /**
+     * @brief 基于当前已学得的 Hopf 内模状态，生成短时扰动预览序列
+     *
+     * 语义说明：
+     * 1. 这里生成的是 learned internal model 的 short-horizon signal extrapolation；
+     * 2. 它不是基于未来海浪真参数或未来状态-海浪耦合关系的真扰动预测；
+     * 3. 因而该预览应被理解为 ancillary MPC 的外生 preview 输入，
+     *    未被该内模捕获的误差部分仍由 residual / tube 机制处理。
+     */
     bool predict_horizon(float *dhat_hor, int nhor, float Ts) const;
 
     void reset();
@@ -48,6 +58,7 @@ private:
     void init_bank(OscillatorBank &bank, const auv::HopfChannelInit &init);
     float reconstruct_disturbance(const OscillatorBank &bank) const;
     void step_bank_euler(OscillatorBank &bank, float F, float Ts, const auv::HopfParams &p);
+    // 仅用于对已学得振子内模做短时自主前滚，不代表真实海浪机理的未来精确传播。
     void step_bank_preview_autonomous(OscillatorBank &bank, float Ts, const auv::HopfParams &p) const;
 
 private:

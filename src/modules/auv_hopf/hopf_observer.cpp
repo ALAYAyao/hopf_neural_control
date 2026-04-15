@@ -76,6 +76,8 @@ float HopfObserver::reconstruct_disturbance(const OscillatorBank &bank) const
     return sum;
 }
 
+// 该步骤只是在冻结当前已学习内模的前提下，对振子组做短时自主前滚。
+// 它表达的是 learned internal model 的外推，而不是未来真海浪-真遭遇频率的精确机理预测。
 void HopfObserver::step_bank_preview_autonomous(OscillatorBank &bank, float Ts, const auv::HopfParams &p) const
 {
     for (int i = 0; i < auv::N_OSC; i++) {
@@ -117,6 +119,9 @@ void HopfObserver::step_bank_preview_autonomous(OscillatorBank &bank, float Ts, 
     }
 }
 
+// 生成的 dhat_hor 用于 ancillary MPC 的外生扰动预览输入。
+// 这里复制当前振子 bank 并做短时前滚，得到的是“当前已学得扰动信号内模”的外推序列。
+// 因为控制器并不知道未来海况真值，所以这里并不尝试构造状态耦合的真扰动预报。
 bool HopfObserver::predict_horizon(float *dhat_hor, int nhor, float Ts) const
 {
     if (dhat_hor == nullptr) {

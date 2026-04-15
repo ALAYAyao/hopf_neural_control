@@ -19,6 +19,8 @@
   代码对象：`AuvHopf::_d_hat`
 - 多步预览 `d_hat[k+i|k]`  
   代码对象：`AuvHopf::_dhat_hor`
+  语义：由当前已学得 Hopf 内模状态做 short-horizon signal extrapolation 得到的外生 preview，
+  不是基于未来海浪真参数与未来状态耦合关系得到的真扰动预报。
 
 ## practical ISS / tube 相关在线量
 
