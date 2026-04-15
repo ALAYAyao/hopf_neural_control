@@ -16,6 +16,8 @@ REQUIRED_SOURCE_PATTERNS = {
         r"_dhat_hor",
         r"_zref_hor",
         r"_vref_hor",
+        r"predict_horizon",
+        r"_hopf_preview_ok",
     ],
     "guarded_mpc": [
         r"bridge_owner_match",
@@ -45,6 +47,8 @@ DEFAULT_THRESHOLDS = {
     "cexok": 0.5,
     "cbrdg": 0.5,
     "abrdg": 0.5,
+    "hprev": 0.5,
+    "prvspn": None,
 }
 
 def check_patterns(name: str, text: str, patterns: list[str]) -> list[str]:
@@ -84,7 +88,7 @@ def summarize_metrics(data: dict[str, list[float]]) -> list[str]:
         if threshold is None:
             lines.append(f"[INFO] {key}: min={vmin:.6g} max={vmax:.6g} last={vlast:.6g}")
         else:
-            ok = vmax <= threshold if key not in {"cexok", "cbrdg", "abrdg"} else vmin >= threshold
+            ok = vmax <= threshold if key not in {"cexok", "cbrdg", "abrdg", "hprev"} else vmin >= threshold
             verdict = "PASS" if ok else "FAIL"
             lines.append(
                 f"[{verdict}] {key}: min={vmin:.6g} max={vmax:.6g} last={vlast:.6g} threshold={threshold:.6g}"
@@ -96,16 +100,18 @@ def main() -> int:
     ap.add_argument("--main", type=Path, required=True, help="AuvHopf 主文件")
     ap.add_argument("--mpc", type=Path, required=True, help="guarded mpc_optim.cpp")
     ap.add_argument("--common", type=Path, required=True, help="auv_common.hpp")
+    ap.add_argument("--hopf", type=Path, help="可选：hopf_observer.cpp，用于检查 autonomous preview rollout")
     ap.add_argument("--metrics-csv", type=Path, help="可选：debug_key_value 导出 CSV，至少包含 key,value 两列")
     args = ap.parse_args()
 
     main_text = args.main.read_text(encoding="utf-8")
     mpc_text = args.mpc.read_text(encoding="utf-8")
     common_text = args.common.read_text(encoding="utf-8")
+    hopf_text = args.hopf.read_text(encoding="utf-8") if args.hopf else ""
 
     failures = 0
     source_texts = {
-        "two_layer_main": main_text,
+        "two_layer_main": main_text + "\n" + hopf_text,
         "guarded_mpc": mpc_text,
         "profile_bundle": common_text,
     }

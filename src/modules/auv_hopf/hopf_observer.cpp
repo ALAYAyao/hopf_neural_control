@@ -76,6 +76,89 @@ float HopfObserver::reconstruct_disturbance(const OscillatorBank &bank) const
     return sum;
 }
 
+void HopfObserver::step_bank_preview_autonomous(OscillatorBank &bank, float Ts, const auv::HopfParams &p) const
+{
+    for (int i = 0; i < auv::N_OSC; i++) {
+        const float x = bank.xi[i];
+        const float y = bank.yi[i];
+        const float w = bank.wi[i];
+        const float a = bank.ai[i];
+
+        const float r2 = x * x + y * y;
+
+        const float dx = p.gamma * (p.mu - r2) * x - w * y;
+        const float dy = p.gamma * (p.mu - r2) * y + w * x;
+        const float dw = 0.0f;
+        const float da = -p.lambda_alpha * a;
+
+        bank.xi[i] += Ts * dx;
+        bank.yi[i] += Ts * dy;
+        bank.wi[i] += Ts * dw;
+        bank.ai[i] += Ts * da;
+
+        if (!PX4_ISFINITE(bank.xi[i])) { bank.xi[i] = 0.0f; }
+        if (!PX4_ISFINITE(bank.yi[i])) { bank.yi[i] = 0.0f; }
+        if (!PX4_ISFINITE(bank.wi[i])) { bank.wi[i] = 0.5f; }
+        if (!PX4_ISFINITE(bank.ai[i])) { bank.ai[i] = 0.0f; }
+
+        if (bank.wi[i] < 0.1f) {
+            bank.wi[i] = 0.1f;
+        }
+
+        if (bank.wi[i] > 20.0f) {
+            bank.wi[i] = 20.0f;
+        }
+
+        if (bank.ai[i] > 200.0f) {
+            bank.ai[i] = 200.0f;
+        } else if (bank.ai[i] < -200.0f) {
+            bank.ai[i] = -200.0f;
+        }
+    }
+}
+
+bool HopfObserver::predict_horizon(float *dhat_hor, int nhor, float Ts) const
+{
+    if (dhat_hor == nullptr) {
+        return false;
+    }
+
+    const int nh = (nhor < 2) ? 2 : ((nhor > auv::NHOR_MAX) ? auv::NHOR_MAX : nhor);
+    const float dt = sanitize_dt(Ts);
+
+    for (int k = 0; k < auv::NHOR_MAX; ++k) {
+        for (int i = 0; i < auv::NP; ++i) {
+            dhat_hor[k * auv::NP + i] = 0.0f;
+        }
+    }
+
+    if (!_initialized) {
+        return false;
+    }
+
+    OscillatorBank osc_u = _osc_u;
+    OscillatorBank osc_v = _osc_v;
+    OscillatorBank osc_r = _osc_r;
+
+    for (int k = 0; k < nh; ++k) {
+        dhat_hor[k * auv::NP + 0] = reconstruct_disturbance(osc_u);
+        dhat_hor[k * auv::NP + 1] = reconstruct_disturbance(osc_v);
+        dhat_hor[k * auv::NP + 2] = reconstruct_disturbance(osc_r);
+
+        step_bank_preview_autonomous(osc_u, dt, _hopf_cfg.surge);
+        step_bank_preview_autonomous(osc_v, dt, _hopf_cfg.sway);
+        step_bank_preview_autonomous(osc_r, dt, _hopf_cfg.yaw);
+    }
+
+    for (int k = nh; k < auv::NHOR_MAX; ++k) {
+        dhat_hor[k * auv::NP + 0] = dhat_hor[(nh - 1) * auv::NP + 0];
+        dhat_hor[k * auv::NP + 1] = dhat_hor[(nh - 1) * auv::NP + 1];
+        dhat_hor[k * auv::NP + 2] = dhat_hor[(nh - 1) * auv::NP + 2];
+    }
+
+    return true;
+}
+
 void HopfObserver::step_bank_euler(OscillatorBank &bank, float F, float Ts, const auv::HopfParams &p)
 {
     for (int i = 0; i < auv::N_OSC; i++) {

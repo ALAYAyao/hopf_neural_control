@@ -50,7 +50,8 @@
  * - 手工圆轨迹不再直接扮演第一层 nominal trajectory；
  * - 它现在只是 mission reference，真正的第一层由 central_mpc 在线生成；
  * - 第二层现在优先使用第一层最近一次求解导出的整条 z* / v* 时域；
- * - 若导出失败，才退回到近似前向滚动兜底；
+ * - Hopf 扰动预览不再使用 ZOH 平铺，而是由当前振子组在 preview horizon 上自主前滚生成；
+ * - 若 central 时域导出失败，才退回到近似前向滚动兜底；
  * - 执行层现在显式使用 actuator_saturation，thruster_allocation 不再承担控制器语义。
  * - 参数初始化改为通过 profile bundle 一次性装载，正式区分 paper_reproduction 与 engineering_default。
  */
@@ -142,6 +143,7 @@ private:
     float _dhat_prev_hor[auv::NP * auv::NHOR_MAX]{};
     float _disturbance_residual_norm{0.0f};
     float _preview_update_norm{0.0f};
+    float _preview_span_norm{0.0f};
     float _tube_tracking_error_norm{0.0f};
     float _tube_value_surrogate{0.0f};
     float _tube_value_delta{0.0f};
@@ -151,6 +153,7 @@ private:
     float _anc_input_violation_norm{0.0f};
     float _physical_clip_norm{0.0f};
     bool _central_export_ok{false};
+    bool _hopf_preview_ok{false};
     bool _central_bridge_ok{true};
     bool _anc_bridge_ok{true};
 
@@ -335,6 +338,7 @@ void AuvHopf::reset_states()
     _xref_nhor = 0;
     _disturbance_residual_norm = 0.0f;
     _preview_update_norm = 0.0f;
+    _preview_span_norm = 0.0f;
     _tube_tracking_error_norm = 0.0f;
     _tube_value_surrogate = 0.0f;
     _tube_value_delta = 0.0f;
@@ -344,6 +348,7 @@ void AuvHopf::reset_states()
     _anc_input_violation_norm = 0.0f;
     _physical_clip_norm = 0.0f;
     _central_export_ok = false;
+    _hopf_preview_ok = false;
     _central_bridge_ok = true;
     _anc_bridge_ok = true;
 
@@ -461,6 +466,7 @@ void AuvHopf::build_mission_reference_horizon()
 void AuvHopf::build_disturbance_preview_horizon()
 {
     const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
+    const float dt_preview = (_anc_mpc.sample_time() > 0.0f) ? _anc_mpc.sample_time() : sanitize_dt(_central_mpc.sample_time());
 
     for (int k = 0; k < auv::NHOR_MAX; ++k) {
         for (int i = 0; i < auv::NP; ++i) {
@@ -468,12 +474,17 @@ void AuvHopf::build_disturbance_preview_horizon()
         }
     }
 
-    // 当前仍采用 zero-order hold preview：
-    // 先保证第二层预测模型真的能“看到” Hopf 估计。
-    for (int k = 0; k < nh && k < auv::NHOR_MAX; ++k) {
-        _dhat_hor[k * auv::NP + 0] = _d_hat(0);
-        _dhat_hor[k * auv::NP + 1] = _d_hat(1);
-        _dhat_hor[k * auv::NP + 2] = _d_hat(2);
+    // 优先使用 Hopf 振子组的自主前滚预览：
+    //   d_hat[k+i|k] 由“当前已学习到的振子状态”在未来地平线上自主演化得到，
+    //   而不是简单把当前一步估计做 ZOH 平铺。
+    _hopf_preview_ok = _hopf.predict_horizon(_dhat_hor, nh, dt_preview);
+
+    if (!_hopf_preview_ok) {
+        for (int k = 0; k < nh && k < auv::NHOR_MAX; ++k) {
+            _dhat_hor[k * auv::NP + 0] = _d_hat(0);
+            _dhat_hor[k * auv::NP + 1] = _d_hat(1);
+            _dhat_hor[k * auv::NP + 2] = _d_hat(2);
+        }
     }
 
     for (int k = nh; k < auv::NHOR_MAX; ++k) {
@@ -492,6 +503,11 @@ void AuvHopf::build_disturbance_preview_horizon()
             _preview_update_norm = delta;
         }
     }
+
+    const float dspan_u = _dhat_hor[(nh - 1) * auv::NP + 0] - _dhat_hor[0];
+    const float dspan_v = _dhat_hor[(nh - 1) * auv::NP + 1] - _dhat_hor[1];
+    const float dspan_r = _dhat_hor[(nh - 1) * auv::NP + 2] - _dhat_hor[2];
+    _preview_span_norm = sqrtf(dspan_u * dspan_u + dspan_v * dspan_v + dspan_r * dspan_r);
 
     for (int i = 0; i < auv::NP * auv::NHOR_MAX; ++i) {
         _dhat_prev_hor[i] = _dhat_hor[i];
@@ -797,9 +813,10 @@ int AuvHopf::print_status()
     PX4_INFO("tau_applied = [%.3f %.3f %.3f]",
              (double)_tau_applied(0), (double)_tau_applied(1), (double)_tau_applied(2));
 
-    PX4_INFO("metrics = residual %.3f, preview_delta %.3f, tube_error %.3f, tube_value %.3f, tube_dV %.3f",
+    PX4_INFO("metrics = residual %.3f, preview_delta %.3f, preview_span %.3f, tube_error %.3f, tube_value %.3f, tube_dV %.3f",
              (double)_disturbance_residual_norm,
              (double)_preview_update_norm,
+             (double)_preview_span_norm,
              (double)_tube_tracking_error_norm,
              (double)_tube_value_surrogate,
              (double)_tube_value_delta);
@@ -811,7 +828,8 @@ int AuvHopf::print_status()
              (double)_anc_input_violation_norm,
              (double)_physical_clip_norm);
 
-    PX4_INFO("solver_guard = central_bridge %d, ancillary_bridge %d, central_export %d, central_stub %d, ancillary_stub %d",
+    PX4_INFO("solver_guard = hopf_preview %d, central_bridge %d, ancillary_bridge %d, central_export %d, central_stub %d, ancillary_stub %d",
+             _hopf_preview_ok ? 1 : 0,
              _central_bridge_ok ? 1 : 0,
              _anc_bridge_ok ? 1 : 0,
              _central_export_ok ? 1 : 0,
@@ -819,10 +837,13 @@ int AuvHopf::print_status()
              _anc_mpc.debug().rodas_stub_touch_count);
 
     PX4_INFO("xref_nhor = %d", _xref_nhor);
-    PX4_INFO("preview0 = [%.3f %.3f %.3f]",
+    PX4_INFO("preview0 = [%.3f %.3f %.3f], previewN = [%.3f %.3f %.3f]",
              (double)_dhat_hor[0],
              (double)_dhat_hor[1],
-             (double)_dhat_hor[2]);
+             (double)_dhat_hor[2],
+             (double)_dhat_hor[(_xref_nhor - 1) * auv::NP + 0],
+             (double)_dhat_hor[(_xref_nhor - 1) * auv::NP + 1],
+             (double)_dhat_hor[(_xref_nhor - 1) * auv::NP + 2]);
 
     PX4_INFO("zref0 = [%.3f %.3f %.3f %.3f %.3f %.3f]",
              (double)_zref_hor[0], (double)_zref_hor[1], (double)_zref_hor[2],
@@ -895,9 +916,10 @@ Key property of this version:
 - mission reference is no longer treated as the central path itself
 - central state z is generated by a dedicated nominal OCP
 - ancillary layer explicitly tracks z* / v* and uses disturbance preview
+- Hopf preview is generated by autonomous oscillator rollout instead of ZOH replication
 - actuator_saturation is now the dedicated physical layer object
 - runtime parameters are loaded through a named profile bundle: engineering_default or paper_reproduction
-- debug stream now exposes residual / preview-update / tube-value / bound-violation metrics for formal validation
+- debug stream now exposes residual / preview-update / preview-span / tube-value / bound-violation metrics for formal validation
 )DESCR_STR");
 
     PRINT_MODULE_USAGE_NAME("auv_hopf", "template");
@@ -956,6 +978,7 @@ void AuvHopf::publish_debug(float dt)
 
     publish_scalar_debug("resid", _disturbance_residual_norm);
     publish_scalar_debug("prvupd", _preview_update_norm);
+    publish_scalar_debug("prvspn", _preview_span_norm);
     publish_scalar_debug("tubee", _tube_tracking_error_norm);
     publish_scalar_debug("tubev", _tube_value_surrogate);
     publish_scalar_debug("tubedv", _tube_value_delta);
@@ -964,6 +987,7 @@ void AuvHopf::publish_debug(float dt)
     publish_scalar_debug("cvu", _central_input_violation_norm);
     publish_scalar_debug("avu", _anc_input_violation_norm);
     publish_scalar_debug("clipn", _physical_clip_norm);
+    publish_scalar_debug("hprev", _hopf_preview_ok ? 1.0f : 0.0f);
     publish_scalar_debug("cexok", _central_export_ok ? 1.0f : 0.0f);
     publish_scalar_debug("cbrdg", _central_bridge_ok ? 1.0f : 0.0f);
     publish_scalar_debug("abrdg", _anc_bridge_ok ? 1.0f : 0.0f);
