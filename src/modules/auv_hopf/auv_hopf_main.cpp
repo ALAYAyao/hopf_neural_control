@@ -1076,19 +1076,37 @@ void AuvHopf::publish_debug(float dt)
     publish_scalar_debug("clipr", sat_dbg.tau_clip(2));
 
     // 实时发送核心数据给 PlotJuggler
+// 实时发送核心数据给 PlotJuggler
     if (_udp_sock >= 0) {
-        char json_buf[512];
+        char json_buf[1024]; // 稍微增大 buffer 防止字符串被截断
+        
+        // 利用 JSON 嵌套，把轨迹和三个通道的扰动分门别类
         snprintf(json_buf, sizeof(json_buf),
-                 "{\"auv\":{\"x\":%.3f, \"y\":%.3f, \"z_x\":%.3f, \"z_y\":%.3f, \"d_true_sway\":%.3f, \"d_hat_sway\":%.3f, \"tube_error\":%.3f}}",
+                 "{"
+                 "\"traj\":{\"x_actual\":%.3f, \"y_actual\":%.3f, \"x_nominal\":%.3f, \"y_nominal\":%.3f, \"x_ref\":%.3f, \"y_ref\":%.3f}, "
+                 "\"dist_surge\":{\"true\":%.3f, \"hat\":%.3f}, "
+                 "\"dist_sway\":{\"true\":%.3f, \"hat\":%.3f}, "
+                 "\"dist_yaw\":{\"true\":%.3f, \"hat\":%.3f}"
+                 "}",
+                 // 1. 轨迹跟踪数据 (实际 x, 名义 z, 目标 xref)
                  (double)_x(0), (double)_x(1),
                  (double)_z(0), (double)_z(1),
+                 (double)_xref(0), (double)_xref(1),
+                 
+                 // 2. 纵向 (Surge) 扰动力
+                 (double)_d_true(0), (double)_d_hat(0),
+                 
+                 // 3. 横向 (Sway) 扰动力
                  (double)_d_true(1), (double)_d_hat(1),
-                 (double)_tube_tracking_error_norm);
+                 
+                 // 4. 艏向 (Yaw) 扰动力矩
+                 (double)_d_true(2), (double)_d_hat(2)
+                 );
                  
         sendto(_udp_sock, json_buf, strlen(json_buf), 0,
                (struct sockaddr *)&_pj_addr, sizeof(_pj_addr));
     }
-    
+
 }
 
 void AuvHopf::publish_scalar_debug(const char *key, float value)
