@@ -30,32 +30,32 @@
  * 当前版本定位：
  * 1. 先把学术代码主链在 PX4 模块内部完整跑通
  * 2. 使用内部状态 x / z 做闭环仿真
- * 3. 后续再根据需要接入真实 PX4 topic
+ * 3. 明确拆出第一层 central-path OCP 与第二层扰动增强预测层
  *
- * 主要数据流（当前整改过渡版）：
- *   d_true       = wave_disturbance.step(x, t)
- *   d_hat        = hopf_observer.update(x, tau_prev, dt)
- *   d_hat_hor    = build_disturbance_preview_horizon(d_hat)
- *   tau_nom      = mpc_optim.solve(z, xref_hor, d_hat_hor)
- *   tau_applied  = thruster_allocation.compute(x, z, d_hat, tau_nom)
- *   x_next       = model.step(x, tau_applied, d_true, dt)
- *   z_next       = model.step(z, tau_nom, d_hat, dt)
+ * 主要数据流（当前两层过渡版）：
+ *   mission_ref_hor = build_mission_reference_horizon(t)
+ *   d_true          = wave_disturbance.step(x, t)
+ *   d_hat           = hopf_observer.update(x, tau_prev, dt)
+ *
+ *   v_central       = central_mpc.solve(z, mission_ref_hor, d_zero)
+ *   z_hor, v_hor    = build_central_rollout_horizon(z, v_central)
+ *
+ *   tau_anc         = ancillary_mpc.solve(x, z_hor, v_hor, d_hat_hor)
+ *   tau_applied     = thruster_allocation.compute(x, x, 0, tau_anc)
+ *
+ *   x_next          = model.step(x, tau_applied, d_true, dt)
+ *   z_next          = model.step(z, v_central, 0, dt)
  *
  * 注意：
- * - 这里先把“扰动 preview 进入预测层”补齐；
- * - 第一层 central-path OCP / 第二层真实 ancillary NMPC 仍需后续继续拆分。
- *
- * 说明：
- * - x 为真实状态（actual state）
- * - z 为名义状态（nominal state）
- * - 二者在 reset 时可相同，但运行中必须独立推进
- * - 这样 ancillary / tube 误差 e = x - z 才有真实控制意义
+ * - 手工圆轨迹不再直接扮演第一层 nominal trajectory；
+ * - 它现在只是 mission reference，真正的第一层由 central_mpc 在线生成；
+ * - 第二层已开始显式跟踪 z* 与 v*，并使用 Hopf preview；
+ * - 执行层仍暂时借用 thruster_allocation 做物理限幅，真正 allocation 拆分后续再做。
  */
 
 class AuvHopf :
     public ModuleBase,
     public ModuleParams
-
 {
 public:
     static Descriptor desc;
@@ -80,41 +80,48 @@ private:
     AuvModel _model;
     HopfObserver _hopf;
     WaveDisturbance _wave;
-    MpcOptim _mpc;
+    MpcOptim _central_mpc;
+    MpcOptim _anc_mpc;
     ThrusterAllocation _alloc;
-    TelemLink _telem{"/dev/ttyS1"}; // <--- 实例化串口模块
+    TelemLink _telem{"/dev/ttyS1"};
 
     //----------------------------------------------
     // 性能计数器
     //----------------------------------------------
-    perf_counter_t _perf_mpc_solve{perf_alloc(PC_ELAPSED, "auv_hopf_mpc")};
+    perf_counter_t _perf_central_solve{perf_alloc(PC_ELAPSED, "auv_hopf_central_mpc")};
+    perf_counter_t _perf_anc_solve{perf_alloc(PC_ELAPSED, "auv_hopf_anc_mpc")};
     perf_counter_t _perf_total_run{perf_alloc(PC_ELAPSED, "auv_hopf_total")};
 
     // --------------------------------------------------
     // 状态变量
     // x : 真实状态 actual state
-    // z : 名义状态 nominal state
+    // z : central-path 当前名义状态
     // --------------------------------------------------
     auv::StateVec _x{};
     auv::StateVec _z{};
 
-    // 当前参考点
+    // mission-level 当前参考点（上层任务参考，不直接等于第一层）
     auv::StateVec _xref{};
 
     // 当前真实扰动 / 学习估计 / 控制量
     auv::InputVec _d_true{};
     auv::InputVec _d_hat{};
-    auv::InputVec _tau_nom{};
+    auv::InputVec _v_central{};
+    auv::InputVec _tau_anc{};
     auv::InputVec _tau_applied{};
     auv::InputVec _tau_prev{};
+    auv::InputVec _zero_input{};
 
     // 调度时间
     hrt_abstime _last_run{0};
     float _sim_time{0.0f};
 
-    // MPC 参考时域缓存
-    float _xref_hor[auv::NX * auv::NHOR_MAX]{};
+    // 时域缓存
+    float _mission_hor[auv::NX * auv::NHOR_MAX]{};
+    float _zref_hor[auv::NX * auv::NHOR_MAX]{};
+    float _vref_hor[auv::NU * auv::NHOR_MAX]{};
     float _dhat_hor[auv::NP * auv::NHOR_MAX]{};
+    float _dzero_hor[auv::NP * auv::NHOR_MAX]{};
     int _xref_nhor{0};
 
     // 调试输出
@@ -122,24 +129,26 @@ private:
 
     // 内部帮助函数
     void reset_states();
-    void build_reference(float t);
-    void build_reference_horizon();
+    void build_mission_reference(float t);
+    void build_mission_reference_horizon();
     void build_disturbance_preview_horizon();
+    void build_zero_disturbance_horizon();
+    void build_central_rollout_horizon();
     void publish_debug(float dt);
 
     static float sanitize_dt(float dt);
 };
 
-// 构造函数
 AuvHopf::AuvHopf() :
     ModuleParams(nullptr)
 {
     reset_states();
 }
-// 析构函数
+
 AuvHopf::~AuvHopf()
 {
-    perf_free(_perf_mpc_solve);
+    perf_free(_perf_central_solve);
+    perf_free(_perf_anc_solve);
     perf_free(_perf_total_run);
 }
 
@@ -164,54 +173,56 @@ void AuvHopf::reset_states()
 
     _d_true.zero();
     _d_hat.zero();
-    _tau_nom.zero();
+    _v_central.zero();
+    _tau_anc.zero();
     _tau_applied.zero();
     _tau_prev.zero();
+    _zero_input.zero();
 
     _sim_time = 0.0f;
     _last_run = 0;
     _xref_nhor = 0;
 
+    for (int i = 0; i < auv::NX * auv::NHOR_MAX; ++i) {
+        _mission_hor[i] = 0.0f;
+        _zref_hor[i] = 0.0f;
+    }
+
+    for (int i = 0; i < auv::NU * auv::NHOR_MAX; ++i) {
+        _vref_hor[i] = 0.0f;
+    }
+
     for (int i = 0; i < auv::NP * auv::NHOR_MAX; ++i) {
         _dhat_hor[i] = 0.0f;
+        _dzero_hor[i] = 0.0f;
     }
 
-    // -----------------------------
     // 初始真实状态
-    // -----------------------------
-    _x(0) = 0.0f;   // X
-    _x(1) = 0.0f;   // Y
-    _x(2) = 0.0f;   // psi
-    _x(3) = 0.0f;   // u
-    _x(4) = 0.0f;   // v
-    _x(5) = 0.0f;   // r
+    _x(0) = 0.0f;
+    _x(1) = 0.0f;
+    _x(2) = 0.0f;
+    _x(3) = 0.0f;
+    _x(4) = 0.0f;
+    _x(5) = 0.0f;
 
-    // -----------------------------
     // 初始名义状态
-    //
-    // reset 时允许 z(0)=x(0)
-    // 但运行后 z 必须独立递推，不能再被 x 覆盖
-    // -----------------------------
     _z = _x;
-
-    for (int i = 0; i < auv::NX * auv::NHOR_MAX; ++i) {
-        _xref_hor[i] = 0.0f;
-    }
 
     _wave.reset();
     _hopf.reset();
-    _mpc.reset();
+    _central_mpc.reset();
+    _anc_mpc.reset();
 }
 
 /**
- * @brief 构造当前参考轨迹点
+ * @brief 构造当前 mission reference 点
  *
- * 示例使用平面圆轨迹：
+ * 这里仍以平面圆轨迹为例，但它现在只承担“任务参考”角色：
  *   Xref = R cos(wt)
  *   Yref = R sin(wt)
  *   psiref = atan2(Ydot, Xdot)
  */
-void AuvHopf::build_reference(float t)
+void AuvHopf::build_mission_reference(float t)
 {
     const float R = 30.0f;
     const float w = 0.02f;
@@ -223,7 +234,7 @@ void AuvHopf::build_reference(float t)
     const float ydot_r =  R * w * cosf(w * t);
 
     const float psi_r = atan2f(ydot_r, xdot_r);
-    const float u_r = R*w;
+    const float u_r = R * w;
     const float v_r = 0.0f;
     const float r_r = w;
 
@@ -237,19 +248,19 @@ void AuvHopf::build_reference(float t)
 }
 
 /**
- * @brief 构造 MPC 参考时域
+ * @brief 构造 mission reference horizon
  *
- * 按平铺方式组织：
- *   [x0(0..5), x1(0..5), ..., xN(0..5)]
+ * 当前手工圆轨迹只作为第一层 nominal OCP 的外部目标，
+ * 不再直接被解释成论文里的 central path。
  */
-void AuvHopf::build_reference_horizon()
+void AuvHopf::build_mission_reference_horizon()
 {
-    _xref_nhor = (_mpc.horizon_length() > 0) ? _mpc.horizon_length() : 20;
-    const float dt = (_mpc.sample_time() > 0.0f) ? _mpc.sample_time() : 0.02f;
+    _xref_nhor = (_central_mpc.horizon_length() > 0) ? _central_mpc.horizon_length() : 20;
+    const float dt = (_central_mpc.sample_time() > 0.0f) ? _central_mpc.sample_time() : 0.02f;
 
     for (int k = 0; k < auv::NHOR_MAX; ++k) {
         for (int i = 0; i < auv::NX; ++i) {
-            _xref_hor[k * auv::NX + i] = 0.0f;
+            _mission_hor[k * auv::NX + i] = 0.0f;
         }
     }
 
@@ -270,12 +281,12 @@ void AuvHopf::build_reference_horizon()
         const float v_r = 0.0f;
         const float r_r = w;
 
-        _xref_hor[k * auv::NX + 0] = xr;
-        _xref_hor[k * auv::NX + 1] = yr;
-        _xref_hor[k * auv::NX + 2] = psi_r;
-        _xref_hor[k * auv::NX + 3] = u_r;
-        _xref_hor[k * auv::NX + 4] = v_r;
-        _xref_hor[k * auv::NX + 5] = r_r;
+        _mission_hor[k * auv::NX + 0] = xr;
+        _mission_hor[k * auv::NX + 1] = yr;
+        _mission_hor[k * auv::NX + 2] = psi_r;
+        _mission_hor[k * auv::NX + 3] = u_r;
+        _mission_hor[k * auv::NX + 4] = v_r;
+        _mission_hor[k * auv::NX + 5] = r_r;
     }
 }
 
@@ -283,17 +294,14 @@ void AuvHopf::build_disturbance_preview_horizon()
 {
     const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
 
-    // 当前先采用 zero-order hold 预览：
-    // 未来每一拍都使用最新 Hopf 估计 d_hat。
-    //
-    // 这一步的目标不是最终论文版预测器，而是先消除
-    // “主链里传 d_zero、预测层完全看不到学习扰动”的结构断点。
     for (int k = 0; k < auv::NHOR_MAX; ++k) {
         for (int i = 0; i < auv::NP; ++i) {
             _dhat_hor[k * auv::NP + i] = 0.0f;
         }
     }
 
+    // 当前仍采用 zero-order hold preview：
+    // 先保证第二层预测模型真的能“看到” Hopf 估计。
     for (int k = 0; k < nh && k < auv::NHOR_MAX; ++k) {
         _dhat_hor[k * auv::NP + 0] = _d_hat(0);
         _dhat_hor[k * auv::NP + 1] = _d_hat(1);
@@ -304,6 +312,66 @@ void AuvHopf::build_disturbance_preview_horizon()
         _dhat_hor[k * auv::NP + 0] = _dhat_hor[(nh - 1) * auv::NP + 0];
         _dhat_hor[k * auv::NP + 1] = _dhat_hor[(nh - 1) * auv::NP + 1];
         _dhat_hor[k * auv::NP + 2] = _dhat_hor[(nh - 1) * auv::NP + 2];
+    }
+}
+
+void AuvHopf::build_zero_disturbance_horizon()
+{
+    for (int k = 0; k < auv::NHOR_MAX; ++k) {
+        for (int i = 0; i < auv::NP; ++i) {
+            _dzero_hor[k * auv::NP + i] = 0.0f;
+        }
+    }
+}
+
+/**
+ * @brief 用当前 central MPC 输出构造 z* / v* horizon
+ *
+ * 当前过渡版还没有从 GRAMPC 内部直接导出完整最优轨迹，
+ * 因此这里采用“当前 z + 当前 v_central 的前向滚动”近似生成中心路径时域。
+ *
+ * 这比直接把 mission reference 当成 central path 更接近两层结构，
+ * 且为后续接入真正 z* / v* 轨迹导出留下了位置。
+ */
+void AuvHopf::build_central_rollout_horizon()
+{
+    const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
+    const float dt = (_central_mpc.sample_time() > 0.0f) ? _central_mpc.sample_time() : 0.02f;
+
+    auv::StateVec z_roll = _z;
+    auv::InputVec d_zero{};
+    d_zero.zero();
+
+    for (int k = 0; k < auv::NHOR_MAX; ++k) {
+        for (int i = 0; i < auv::NX; ++i) {
+            _zref_hor[k * auv::NX + i] = 0.0f;
+        }
+
+        for (int i = 0; i < auv::NU; ++i) {
+            _vref_hor[k * auv::NU + i] = 0.0f;
+        }
+    }
+
+    for (int k = 0; k < nh && k < auv::NHOR_MAX; ++k) {
+        for (int i = 0; i < auv::NX; ++i) {
+            _zref_hor[k * auv::NX + i] = z_roll(i);
+        }
+
+        for (int i = 0; i < auv::NU; ++i) {
+            _vref_hor[k * auv::NU + i] = _v_central(i);
+        }
+
+        z_roll = _model.step(z_roll, _v_central, d_zero, dt);
+    }
+
+    for (int k = nh; k < auv::NHOR_MAX; ++k) {
+        for (int i = 0; i < auv::NX; ++i) {
+            _zref_hor[k * auv::NX + i] = _zref_hor[(nh - 1) * auv::NX + i];
+        }
+
+        for (int i = 0; i < auv::NU; ++i) {
+            _vref_hor[k * auv::NU + i] = _vref_hor[(nh - 1) * auv::NU + i];
+        }
     }
 }
 
@@ -329,11 +397,17 @@ bool AuvHopf::init()
     _alloc.set_plant_params(plant);
     _alloc.set_params(tube);
 
-    _mpc.set_plant_params(plant);
-    _mpc.set_weight_params(mpc_w);
-    _mpc.set_bounds_params(mpc_b);
-    _mpc.set_mpc_config(mpc_c);
-    _mpc.initialize(mpc_c.dt, mpc_c.Thor);
+    _central_mpc.set_plant_params(plant);
+    _central_mpc.set_weight_params(mpc_w);
+    _central_mpc.set_bounds_params(mpc_b);
+    _central_mpc.set_mpc_config(mpc_c);
+    _central_mpc.initialize(mpc_c.dt, mpc_c.Thor);
+
+    _anc_mpc.set_plant_params(plant);
+    _anc_mpc.set_weight_params(mpc_w);
+    _anc_mpc.set_bounds_params(mpc_b);
+    _anc_mpc.set_mpc_config(mpc_c);
+    _anc_mpc.initialize(mpc_c.dt, mpc_c.Thor);
 
     reset_states();
 
@@ -350,105 +424,105 @@ void AuvHopf::run()
         return;
     }
 
-    float dt = (_mpc.sample_time() > 0.0f) ? _mpc.sample_time() : 0.02f;
+    float dt = (_central_mpc.sample_time() > 0.0f) ? _central_mpc.sample_time() : 0.02f;
     dt = sanitize_dt(dt);
     const hrt_abstime dt_us = static_cast<hrt_abstime>(dt * 1e6f);
 
-    //锚定系统绝对时间作为循环起点，避免初始 dt 过大
     hrt_abstime next_run_time = hrt_absolute_time();
-    // TelemData current_telem_data{};
 
     while (!should_exit()) {
 
         next_run_time += dt_us;
-        //---------------------------------
-        // --- 算法执行块开始 性能计数器：总运行时间---
+
         perf_begin(_perf_total_run);
         _sim_time += dt;
 
-        // 尝试提取最新数据
-        // if (_telem.get_latest_data(current_telem_data)) {
-        //     // 如果拿到了新数据，就在这里把数据喂给你的算法！
-        //     // 比如： _x(3) = current_telem_data.rpm * 0.1f;
-        //     PX4_INFO("Got fresh data! RPM = %.2f", (double)current_telem_data.rpm);
-        // } else {
-        //     // 如果没拿到新数据（串口没发或者频率没对上）
-        //     // 算法会静默使用上一拍的老数据继续算，保证绝对安全！
-        // }
-
         // --------------------------------------------------
-        // 1) 构造当前参考与参考时域
-        build_reference(_sim_time);
-        build_reference_horizon();
+        // 1) 构造 mission reference 与外扰 / 学习器输出
+        build_mission_reference(_sim_time);
+        build_mission_reference_horizon();
 
-        // --------------------------------------------------
-        // 2) 真实外扰作用
         _d_true = _wave.step(_x, _sim_time);
+        _d_hat  = _hopf.update(_x, _tau_prev, dt);
 
-        // --------------------------------------------------
-        // 3) Hopf 在线扰动学习
-        _d_hat = _hopf.update(_x, _tau_prev, dt);
-
-        // --------------------------------------------------
-        // 4) 构造多步扰动预览，并送入预测层
         build_disturbance_preview_horizon();
-        _mpc.set_reference_horizon_preview(_z, _xref_hor, _dhat_hor, _xref_nhor);
+        build_zero_disturbance_horizon();
 
         // --------------------------------------------------
-        // 5) 求 nominal control
-        // 性能计数器：MPC 求解时间
-        perf_begin(_perf_mpc_solve); // 核心：单独记录 MPC 求解耗时
-        _tau_nom = _mpc.solve();
-        perf_end(_perf_mpc_solve);
-
-        // --------------------------------------------------
-        // 6) ancillary / allocation
-        _tau_applied = _alloc.compute(_x, _z, _d_hat, _tau_nom);
-
-        // --------------------------------------------------
-        // 7) 真实状态推进：actual state x
-        _x = _model.step(_x, _tau_applied, _d_true, dt);
-
-        // --------------------------------------------------
-        // 8) 过渡版内部预测状态推进
+        // 2) 第一层：central-path OCP
         //
-        // 说明：
-        // 当前 _mpc 已经开始使用扰动 preview，
-        // 因而这里不再继续用 d_zero 占位，而是同步使用最新 d_hat，
-        // 保持控制器内部状态推进与预测层的一致性。
-        _z = _model.step(_z, _tau_nom, _d_hat, dt);
+        // 目标：
+        //   z, v 由 nominal OCP 追 mission reference 生成；
+        //   这里显式不注入 Hopf preview，保持第一层干净。
+        _central_mpc.set_reference_horizon_control_preview(
+            _z,
+            _mission_hor,
+            nullptr,
+            _dzero_hor,
+            _xref_nhor);
+
+        perf_begin(_perf_central_solve);
+        _v_central = _central_mpc.solve();
+        perf_end(_perf_central_solve);
 
         // --------------------------------------------------
-        // 9) 更新上一拍实际执行控制
+        // 3) 用 central 输出构造 z* / v* horizon，供第二层使用
+        build_central_rollout_horizon();
+
+        // --------------------------------------------------
+        // 4) 第二层：Hopf-augmented ancillary MPC
+        //
+        // 当前第二层使用：
+        //   xref = z* horizon
+        //   uref = v* horizon
+        //   p    = d_hat preview
+        _anc_mpc.set_reference_horizon_control_preview(
+            _x,
+            _zref_hor,
+            _vref_hor,
+            _dhat_hor,
+            _xref_nhor);
+
+        perf_begin(_perf_anc_solve);
+        _tau_anc = _anc_mpc.solve();
+        perf_end(_perf_anc_solve);
+
+        // --------------------------------------------------
+        // 5) 执行层（当前过渡版）
+        //
+        // 先借用 thruster_allocation 只做物理限幅，不再让它承担
+        // “第二层 controller”职责。
+        auv::InputVec d_zero{};
+        d_zero.zero();
+        _tau_applied = _alloc.compute(_x, _x, d_zero, _tau_anc);
+
+        // --------------------------------------------------
+        // 6) 推进真实状态与 central 状态
+        _x = _model.step(_x, _tau_applied, _d_true, dt);
+        _z = _model.step(_z, _v_central, d_zero, dt);
+
+        // --------------------------------------------------
+        // 7) 记录上一拍实际执行控制
         _tau_prev = _tau_applied;
 
-        // 如果算出来是 6.82，就会拼成 "T6.8\r\n" 发送出去
-        // char tx_buf[16];
-        // //snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", (double)_tau_applied(0));
-        // double stt = 6.8;
-        // snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", stt);
-        // _telem.send_string(tx_buf);
         // --------------------------------------------------
-        // 10) 发布调试信息
+        // 8) 发布调试信息
         publish_debug(dt);
 
-        // --------------------------------------------------
-        // 算法执行结束，性能计数器：总运行时间
         perf_end(_perf_total_run);
-        // --------------------------------------------------
-        // 4. 时序控制：计算剩余裕量并让出 CPU
+
         hrt_abstime now = hrt_absolute_time();
 
         if (_sim_time >= 300.0f) {
-                    PX4_INFO("时间到！已运行 300 秒，算法自动安全退出。");
-                    request_stop(); // 优雅地触发 should_exit() = true
-                }
+            PX4_INFO("时间到！已运行 300 秒，算法自动安全退出。");
+            request_stop();
+        }
 
         if (now < next_run_time) {
             px4_usleep(next_run_time - now);
         } else {
             PX4_WARN("Deadline Missed! dt overrun.");
-            next_run_time = now; // 重置时间锚点
+            next_run_time = now;
         }
     }
 }
@@ -466,7 +540,7 @@ int AuvHopf::print_status()
              (double)_z(0), (double)_z(1), (double)_z(2),
              (double)_z(3), (double)_z(4), (double)_z(5));
 
-    PX4_INFO("xref = [%.3f %.3f %.3f %.3f %.3f %.3f]",
+    PX4_INFO("mission_ref = [%.3f %.3f %.3f %.3f %.3f %.3f]",
              (double)_xref(0), (double)_xref(1), (double)_xref(2),
              (double)_xref(3), (double)_xref(4), (double)_xref(5));
 
@@ -484,8 +558,11 @@ int AuvHopf::print_status()
     PX4_INFO("d_hat = [%.3f %.3f %.3f]",
              (double)_d_hat(0), (double)_d_hat(1), (double)_d_hat(2));
 
-    PX4_INFO("tau_nom = [%.3f %.3f %.3f]",
-             (double)_tau_nom(0), (double)_tau_nom(1), (double)_tau_nom(2));
+    PX4_INFO("v_central = [%.3f %.3f %.3f]",
+             (double)_v_central(0), (double)_v_central(1), (double)_v_central(2));
+
+    PX4_INFO("tau_anc = [%.3f %.3f %.3f]",
+             (double)_tau_anc(0), (double)_tau_anc(1), (double)_tau_anc(2));
 
     PX4_INFO("tau_applied = [%.3f %.3f %.3f]",
              (double)_tau_applied(0), (double)_tau_applied(1), (double)_tau_applied(2));
@@ -496,9 +573,12 @@ int AuvHopf::print_status()
              (double)_dhat_hor[1],
              (double)_dhat_hor[2]);
 
+    PX4_INFO("zref0 = [%.3f %.3f %.3f %.3f %.3f %.3f]",
+             (double)_zref_hor[0], (double)_zref_hor[1], (double)_zref_hor[2],
+             (double)_zref_hor[3], (double)_zref_hor[4], (double)_zref_hor[5]);
+
     return 0;
 }
-
 
 AuvHopf *AuvHopf::instantiate(int argc, char *argv[])
 {
@@ -516,35 +596,27 @@ int AuvHopf::trampoline(int argc, char *argv[])
         return -1;
     }
 
-    // 将实例注册到系统描述符中
     desc.object.store(instance);
-
-    // 开始执行核心硬实时大循环 (run 内部会自动调用 init)
     instance->run();
-
-    // 只有当收到 stop 命令，退出 while(!should_exit()) 后，才会执行到这里
     delete instance;
     desc.object.store(nullptr);
     desc.task_id = -1;
     return 0;
 }
 
-// 替换原来的 task_spawn
 int AuvHopf::task_spawn(int argc, char *argv[])
 {
-    // 向系统申请独立线程，并将程序入口指向 trampoline
     int task_id = px4_task_spawn_cmd("auv_hopf",
                                      SCHED_DEFAULT,
                                      SCHED_PRIORITY_ATTITUDE_CONTROL,
                                      4096,
-                                     (px4_main_t)&AuvHopf::trampoline, // 指向跳板函数
+                                     (px4_main_t)&AuvHopf::trampoline,
                                      (char *const *)argv);
 
     if (task_id < 0) {
-        return -errno; // 启动失败
+        return -errno;
     }
 
-    // 🚨 把系统分配给你的真实特权线程号存起来
     desc.task_id = task_id;
     return 0;
 }
@@ -565,13 +637,14 @@ int AuvHopf::print_usage(const char *reason)
 ### Description
 AUV Hopf + Tube-MPC composite control module.
 
-Current version runs the academic closed-loop chain internally:
-wave disturbance -> Hopf learner -> MPC -> ancillary allocation -> plant update
+Current version runs a two-layer transitional architecture internally:
+wave disturbance -> Hopf learner -> central-path MPC -> Hopf-augmented ancillary MPC -> physical saturation -> plant update
 
 Key property of this version:
-- actual state x and nominal state z are propagated independently
-- z is no longer overwritten by x
-- tube / ancillary feedback therefore has actual closed-loop meaning
+- mission reference is no longer treated as the central path itself
+- central state z is generated by a dedicated nominal OCP
+- ancillary layer explicitly tracks z* / v* and uses disturbance preview
+- thruster_allocation is temporarily retained only as the physical saturation layer
 )DESCR_STR");
 
     PRINT_MODULE_USAGE_NAME("auv_hopf", "template");
@@ -589,7 +662,6 @@ void AuvHopf::publish_debug(float dt)
     msg.sim_time = _sim_time;
     msg.dt = dt;
 
-    // 状态与误差拷贝
     for (int i = 0; i < auv::NX; ++i) {
         msg.x[i]         = _x(i);
         msg.z[i]         = _z(i);
@@ -597,15 +669,15 @@ void AuvHopf::publish_debug(float dt)
         msg.error_x_z[i] = _x(i) - _z(i);
     }
 
-    // 3维向量拷贝
     for (int i = 0; i < auv::NU; ++i) {
+        // 这里先把 tau_nom 字段复用为第一层 central input，
+        // 便于后续区分第一层 / 第二层控制输出。
         msg.d_true[i]      = _d_true(i);
         msg.d_hat[i]       = _d_hat(i);
-        msg.tau_nom[i]     = _tau_nom(i);
+        msg.tau_nom[i]     = _v_central(i);
         msg.tau_applied[i] = _tau_applied(i);
     }
 
-    // 内部调试信息
     const auto &hopf_dbg = _hopf.debug();
     msg.hopf_surge[0] = hopf_dbg.surge.d_raw;
     msg.hopf_surge[1] = hopf_dbg.surge.d_pred_before;
@@ -622,22 +694,19 @@ void AuvHopf::publish_debug(float dt)
     const auto &alloc_dbg = _alloc.debug();
     for (int i = 0; i < 3; ++i) {
         msg.tau_fb[i]        = alloc_dbg.tau_fb(i);
-        msg.tau_ancillary[i] = alloc_dbg.tau_ancillary(i);
+        msg.tau_ancillary[i] = _tau_anc(i);
         msg.tau_raw[i]       = alloc_dbg.tau_raw(i);
     }
 
     msg.xref_nhor = static_cast<uint8_t>(_xref_nhor);
-
-    // 发布！
     _status_pub.publish(msg);
 }
 
-
-ModuleBase::Descriptor AuvHopf::desc{AuvHopf::task_spawn, AuvHopf::custom_command, AuvHopf::print_usage};
+ModuleBase::Descriptor AuvHopf::desc{
+    AuvHopf::task_spawn, AuvHopf::custom_command, AuvHopf::print_usage
+};
 
 extern "C" __EXPORT int auv_hopf_main(int argc, char *argv[])
 {
-    // 正确的写法：调用 ModuleBase 的 main，并把我们自己的名片 (desc) 传进去！
     return ModuleBase::main(AuvHopf::desc, argc, argv);
 }
-

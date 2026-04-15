@@ -40,6 +40,7 @@ public:
         double P[auv::NX]{};
 
         double xref_hor[auv::NX * auv::NHOR_MAX]{};
+        double uref_hor[auv::NU * auv::NHOR_MAX]{};
         double dhat_hor[auv::NP * auv::NHOR_MAX]{};
         int Nhor_ref{2};
     };
@@ -84,6 +85,25 @@ public:
                                        const float *xref_hor,
                                        const float *dhat_hor,
                                        int nhor);
+
+    /**
+     * @brief 设置带状态参考、控制参考和扰动预览的完整时域
+     *
+     * 对 central-path OCP：
+     *   xref_hor = mission reference
+     *   uref_hor = nullptr / zero
+     *   dhat_hor = zero preview
+     *
+     * 对 ancillary NMPC：
+     *   xref_hor = z* horizon
+     *   uref_hor = v* horizon
+     *   dhat_hor = d_hat[k+i|k]
+     */
+    void set_reference_horizon_control_preview(const StateVec &z,
+                                               const float *xref_hor,
+                                               const float *uref_hor,
+                                               const float *dhat_hor,
+                                               int nhor);
 
     InputVec solve();
     void reset();

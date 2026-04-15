@@ -8,7 +8,11 @@ namespace
 
 // ======================================================
 // 当前活动实例桥接到 GRAMPC C 风格回调
-// 假设系统中同一时刻只使用一个 MpcOptim 实例
+//
+// 注意：
+// 1) 这里仍然通过全局 g_up 把 C 风格回调绑定到当前实例；
+// 2) 但 solve / set_reference... 会在调用前显式激活所属实例，
+//    因而可以串行复用多个 MpcOptim（例如 central + ancillary）。
 // ======================================================
 static MpcOptim::UserParam *g_up = nullptr;
 
@@ -47,6 +51,15 @@ static const double *get_xref_terminal(const MpcOptim::UserParam *up)
 {
     const int k = clamp_int(up->Nhor_ref - 1, 0, auv::NHOR_MAX - 1);
     return &up->xref_hor[auv::NX * k];
+}
+
+
+static const double *get_uref_stage(double t,
+                                    const typeGRAMPCparam *param,
+                                    const MpcOptim::UserParam *up)
+{
+    const int k = get_stage_index(t, param, up);
+    return &up->uref_hor[auv::NU * k];
 }
 
 static const double *get_dhat_stage(double t,
@@ -289,8 +302,11 @@ void lfct(typeRNum *out,
         cost += 0.5 * up->Q[i] * e * e;
     }
 
+    const double *udes = get_uref_stage(t, param, up);
+
     for (int i = 0; i < auv::NU; ++i) {
-        cost += 0.5 * up->R[i] * u[i] * u[i];
+        const double du = u[i] - udes[i];
+        cost += 0.5 * up->R[i] * du * du;
     }
 
     *out = cost;
@@ -335,9 +351,10 @@ void dldu(typeRNum *out,
     (void)userparam;
 
     const auto *up = g_up;
+    const double *udes = get_uref_stage(t, param, up);
 
     for (int i = 0; i < auv::NU; ++i) {
-        out[i] = up->R[i] * u[i];
+        out[i] = up->R[i] * (u[i] - udes[i]);
     }
 }
 
@@ -748,6 +765,10 @@ void MpcOptim::sync_userparam_from_common()
         _userparam.xref_hor[i] = 0.0;
     }
 
+    for (int i = 0; i < auv::NU * auv::NHOR_MAX; ++i) {
+        _userparam.uref_hor[i] = 0.0;
+    }
+
     for (int i = 0; i < auv::NP * auv::NHOR_MAX; ++i) {
         _userparam.dhat_hor[i] = 0.0;
     }
@@ -888,13 +909,22 @@ void MpcOptim::set_reference_horizon(const StateVec &z,
         }
     }
 
-    set_reference_horizon_preview(z, xref_hor, dhat_hor, nh);
+    set_reference_horizon_control_preview(z, xref_hor, nullptr, dhat_hor, nh);
 }
 
 void MpcOptim::set_reference_horizon_preview(const StateVec &z,
                                              const float *xref_hor,
                                              const float *dhat_hor,
                                              int nhor)
+{
+    set_reference_horizon_control_preview(z, xref_hor, nullptr, dhat_hor, nhor);
+}
+
+void MpcOptim::set_reference_horizon_control_preview(const StateVec &z,
+                                                     const float *xref_hor,
+                                                     const float *uref_hor,
+                                                     const float *dhat_hor,
+                                                     int nhor)
 {
     if (!_initialized) {
         initialize(0.02f, 0.4f);
@@ -903,6 +933,8 @@ void MpcOptim::set_reference_horizon_preview(const StateVec &z,
     if (_grampc == nullptr) {
         return;
     }
+
+    g_up = &_userparam;
 
     const int nh = clamp_int(nhor, 2, auv::NHOR_MAX);
     _userparam.Nhor_ref = nh;
@@ -929,6 +961,28 @@ void MpcOptim::set_reference_horizon_preview(const StateVec &z,
         for (int k = 0; k < auv::NHOR_MAX; ++k) {
             for (int i = 0; i < auv::NX; ++i) {
                 _userparam.xref_hor[k * auv::NX + i] = static_cast<double>(z(i));
+            }
+        }
+    }
+
+    if (uref_hor != nullptr) {
+        for (int k = 0; k < nh; ++k) {
+            for (int i = 0; i < auv::NU; ++i) {
+                _userparam.uref_hor[k * auv::NU + i] =
+                    static_cast<double>(uref_hor[k * auv::NU + i]);
+            }
+        }
+
+        for (int k = nh; k < auv::NHOR_MAX; ++k) {
+            for (int i = 0; i < auv::NU; ++i) {
+                _userparam.uref_hor[k * auv::NU + i] =
+                    _userparam.uref_hor[(nh - 1) * auv::NU + i];
+            }
+        }
+    } else {
+        for (int k = 0; k < auv::NHOR_MAX; ++k) {
+            for (int i = 0; i < auv::NU; ++i) {
+                _userparam.uref_hor[k * auv::NU + i] = 0.0;
             }
         }
     }
@@ -960,6 +1014,11 @@ void MpcOptim::set_reference_horizon_preview(const StateVec &z,
             _userparam.xref_hor[(nh - 1) * auv::NX + i];
     }
 
+    for (int i = 0; i < auv::NU; ++i) {
+        _grampc->param->udes[i] =
+            _userparam.uref_hor[i];
+    }
+
     // 兼容仍然依赖 param->p0 的库内部逻辑：
     // 这里同步写入第 0 个 preview stage。
     for (int i = 0; i < auv::NP; ++i) {
@@ -978,6 +1037,7 @@ MpcOptim::InputVec MpcOptim::solve()
         return out;
     }
 
+    g_up = &_userparam;
     grampc_run(_grampc);
 
     for (int i = 0; i < auv::NU; ++i) {
