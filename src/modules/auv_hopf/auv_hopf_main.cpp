@@ -38,7 +38,7 @@
  *   d_hat           = hopf_observer.update(x, tau_prev, dt)
  *
  *   v_central       = central_mpc.solve(z, mission_ref_hor, d_zero)
- *   z_hor, v_hor    = build_central_rollout_horizon(z, v_central)
+ *   z_hor, v_hor    = central_mpc.export_last_solution_horizon(...)
  *
  *   tau_anc         = ancillary_mpc.solve(x, z_hor, v_hor, d_hat_hor)
  *   tau_applied     = thruster_allocation.compute(x, x, 0, tau_anc)
@@ -49,7 +49,8 @@
  * 注意：
  * - 手工圆轨迹不再直接扮演第一层 nominal trajectory；
  * - 它现在只是 mission reference，真正的第一层由 central_mpc 在线生成；
- * - 第二层已开始显式跟踪 z* 与 v*，并使用 Hopf preview；
+ * - 第二层现在优先使用第一层最近一次求解导出的整条 z* / v* 时域；
+ * - 若导出失败，才退回到近似前向滚动兜底；
  * - 执行层仍暂时借用 thruster_allocation 做物理限幅，真正 allocation 拆分后续再做。
  */
 
@@ -325,22 +326,16 @@ void AuvHopf::build_zero_disturbance_horizon()
 }
 
 /**
- * @brief 用当前 central MPC 输出构造 z* / v* horizon
+ * @brief 获取第一层 recent solve 对应的 z* / v* horizon
  *
- * 当前过渡版还没有从 GRAMPC 内部直接导出完整最优轨迹，
- * 因此这里采用“当前 z + 当前 v_central 的前向滚动”近似生成中心路径时域。
+ * 新版优先直接读取 central_mpc 最近一次求解得到的整条最优控制时域，
+ * 再由求解器侧缓存出的状态/控制时域作为第二层参考。
  *
- * 这比直接把 mission reference 当成 central path 更接近两层结构，
- * 且为后续接入真正 z* / v* 轨迹导出留下了位置。
+ * 只有在导出失败时，才退回到“当前 z + 当前 v_central 的前向滚动”近似。
  */
 void AuvHopf::build_central_rollout_horizon()
 {
     const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
-    const float dt = (_central_mpc.sample_time() > 0.0f) ? _central_mpc.sample_time() : 0.02f;
-
-    auv::StateVec z_roll = _z;
-    auv::InputVec d_zero{};
-    d_zero.zero();
 
     for (int k = 0; k < auv::NHOR_MAX; ++k) {
         for (int i = 0; i < auv::NX; ++i) {
@@ -351,6 +346,16 @@ void AuvHopf::build_central_rollout_horizon()
             _vref_hor[k * auv::NU + i] = 0.0f;
         }
     }
+
+    if (_central_mpc.export_last_solution_horizon(_zref_hor, _vref_hor, nh)) {
+        return;
+    }
+
+    const float dt = (_central_mpc.sample_time() > 0.0f) ? _central_mpc.sample_time() : 0.02f;
+
+    auv::StateVec z_roll = _z;
+    auv::InputVec d_zero{};
+    d_zero.zero();
 
     for (int k = 0; k < nh && k < auv::NHOR_MAX; ++k) {
         for (int i = 0; i < auv::NX; ++i) {

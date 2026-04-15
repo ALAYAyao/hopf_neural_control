@@ -111,10 +111,23 @@ public:
     bool initialized() const { return _initialized; }
     const DebugInfo &debug() const { return _debug; }
 
+    int last_solution_horizon_length() const { return _last_solution_nhor; }
+
+    /**
+     * @brief 导出最近一次求解得到的状态/控制时域
+     *
+     * x_hor 和 u_hor 均按 stage 平铺，长度由 nhor_max 指定。
+     * 若 nhor_max 大于实际缓存长度，则尾部用最后一个 stage 保持。
+     */
+    bool export_last_solution_horizon(float *x_hor,
+                                      float *u_hor,
+                                      int nhor_max) const;
+
 private:
     void free_grampc();
     void sync_userparam_from_common();
     int compute_nhor(double dt, double Thor) const;
+    void cache_last_solution_horizon();
 
 private:
     typeGRAMPC *_grampc{nullptr};
@@ -127,4 +140,8 @@ private:
     UserParam _userparam{};
     bool _initialized{false};
     DebugInfo _debug{};
+
+    float _last_x_hor[auv::NX * auv::NHOR_MAX]{};
+    float _last_u_hor[auv::NU * auv::NHOR_MAX]{};
+    int _last_solution_nhor{0};
 };

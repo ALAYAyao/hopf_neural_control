@@ -70,6 +70,53 @@ static const double *get_dhat_stage(double t,
     return &up->dhat_hor[auv::NP * k];
 }
 
+static auv::StateVec propagate_discrete_stage(const auv::StateVec &x,
+                                              const auv::InputVec &u,
+                                              const auv::ParamVec &d,
+                                              const auv::AuvPlantParams &plant,
+                                              float dt)
+{
+    auv::StateVec xnext = x;
+
+    const float psi = x(2);
+    const float uu  = x(3);
+    const float vv  = x(4);
+    const float rr  = x(5);
+
+    const float tau_u = u(0);
+    const float tau_v = u(1);
+    const float tau_r = u(2);
+
+    const float d_u = d(0);
+    const float d_v = d(1);
+    const float d_r = d(2);
+
+    const float cpsi = cosf(psi);
+    const float spsi = sinf(psi);
+
+    const float Xdot = cpsi * uu - spsi * vv;
+    const float Ydot = spsi * uu + cpsi * vv;
+    const float psidot = rr;
+
+    const float udot =
+        (tau_u + d_u - plant.Du * uu + plant.m_v * vv * rr) / plant.m_u;
+
+    const float vdot =
+        (tau_v + d_v - plant.Dv * vv - plant.m_u * uu * rr) / plant.m_v;
+
+    const float rdot =
+        (tau_r + d_r - plant.Dr * rr + (plant.m_u - plant.m_v) * uu * vv) / plant.Iz;
+
+    xnext(0) = x(0) + dt * Xdot;
+    xnext(1) = x(1) + dt * Ydot;
+    xnext(2) = static_cast<float>(wrap_pi(static_cast<double>(x(2) + dt * psidot)));
+    xnext(3) = x(3) + dt * udot;
+    xnext(4) = x(4) + dt * vdot;
+    xnext(5) = x(5) + dt * rdot;
+
+    return xnext;
+}
+
 } // anonymous namespace
 
 // ======================================================
@@ -853,6 +900,14 @@ void MpcOptim::initialize(float dt, float Thor)
     _debug.Nhor = nhor;
     _debug.t0 = 0.0f;
     _debug.last_u_nom.zero();
+
+    _last_solution_nhor = 0;
+    for (int i = 0; i < auv::NX * auv::NHOR_MAX; ++i) {
+        _last_x_hor[i] = 0.0f;
+    }
+    for (int i = 0; i < auv::NU * auv::NHOR_MAX; ++i) {
+        _last_u_hor[i] = 0.0f;
+    }
 }
 
 void MpcOptim::set_plant_params(const auv::AuvPlantParams &plant)
@@ -1028,6 +1083,86 @@ void MpcOptim::set_reference_horizon_control_preview(const StateVec &z,
     _grampc->param->t0 = static_cast<double>(_debug.t0);
 }
 
+void MpcOptim::cache_last_solution_horizon()
+{
+    _last_solution_nhor = 0;
+
+    for (int i = 0; i < auv::NX * auv::NHOR_MAX; ++i) {
+        _last_x_hor[i] = 0.0f;
+    }
+
+    for (int i = 0; i < auv::NU * auv::NHOR_MAX; ++i) {
+        _last_u_hor[i] = 0.0f;
+    }
+
+    if (!_initialized || _grampc == nullptr || _grampc->rws == nullptr || _grampc->param == nullptr) {
+        return;
+    }
+
+    const int nh = clamp_int(_debug.Nhor, 2, auv::NHOR_MAX);
+    const float dt = (_debug.dt > 0.0f) ? _debug.dt : 0.02f;
+
+    StateVec xk{};
+    for (int i = 0; i < auv::NX; ++i) {
+        xk(i) = static_cast<float>(_grampc->param->x0[i]);
+    }
+
+    for (int k = 0; k < nh; ++k) {
+        for (int i = 0; i < auv::NX; ++i) {
+            _last_x_hor[k * auv::NX + i] = xk(i);
+        }
+
+        InputVec uk{};
+        for (int i = 0; i < auv::NU; ++i) {
+            const float ui = static_cast<float>(_grampc->rws->u[k * auv::NU + i]);
+            uk(i) = ui;
+            _last_u_hor[k * auv::NU + i] = ui;
+        }
+
+        if (k < nh - 1) {
+            ParamVec dk{};
+            for (int i = 0; i < auv::NP; ++i) {
+                dk(i) = static_cast<float>(_userparam.dhat_hor[k * auv::NP + i]);
+            }
+            xk = propagate_discrete_stage(xk, uk, dk, _plant, dt);
+        }
+    }
+
+    _last_solution_nhor = nh;
+}
+
+bool MpcOptim::export_last_solution_horizon(float *x_hor,
+                                            float *u_hor,
+                                            int nhor_max) const
+{
+    if (_last_solution_nhor < 2) {
+        return false;
+    }
+
+    const int nh = clamp_int(nhor_max, 2, auv::NHOR_MAX);
+    const int ncopy = (_last_solution_nhor < nh) ? _last_solution_nhor : nh;
+
+    if (x_hor != nullptr) {
+        for (int k = 0; k < nh; ++k) {
+            const int ks = (k < ncopy) ? k : (ncopy - 1);
+            for (int i = 0; i < auv::NX; ++i) {
+                x_hor[k * auv::NX + i] = _last_x_hor[ks * auv::NX + i];
+            }
+        }
+    }
+
+    if (u_hor != nullptr) {
+        for (int k = 0; k < nh; ++k) {
+            const int ks = (k < ncopy) ? k : (ncopy - 1);
+            for (int i = 0; i < auv::NU; ++i) {
+                u_hor[k * auv::NU + i] = _last_u_hor[ks * auv::NU + i];
+            }
+        }
+    }
+
+    return true;
+}
+
 MpcOptim::InputVec MpcOptim::solve()
 {
     InputVec out{};
@@ -1039,6 +1174,7 @@ MpcOptim::InputVec MpcOptim::solve()
 
     g_up = &_userparam;
     grampc_run(_grampc);
+    cache_last_solution_horizon();
 
     for (int i = 0; i < auv::NU; ++i) {
         out(i) = static_cast<float>(_grampc->sol->unext[i]);
@@ -1056,5 +1192,13 @@ void MpcOptim::reset()
     sync_userparam_from_common();
     _debug.last_u_nom.zero();
     _debug.t0 = 0.0f;
+
+    _last_solution_nhor = 0;
+    for (int i = 0; i < auv::NX * auv::NHOR_MAX; ++i) {
+        _last_x_hor[i] = 0.0f;
+    }
+    for (int i = 0; i < auv::NU * auv::NHOR_MAX; ++i) {
+        _last_u_hor[i] = 0.0f;
+    }
 }
 
