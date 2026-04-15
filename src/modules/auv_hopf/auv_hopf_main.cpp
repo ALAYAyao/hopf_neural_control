@@ -22,6 +22,10 @@
 #include "actuator_saturation.hpp"
 #include "telem_link.hpp"
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
 /**
  * @file auv_hopf_main.cpp
  *
@@ -102,6 +106,10 @@ private:
     // --------------------------------------------------
     auv::StateVec _x{};
     auv::StateVec _z{};
+
+    // PlotJuggler UDP 实时推流
+    int _udp_sock{-1};
+    struct sockaddr_in _pj_addr{};
 
     // mission-level 当前参考点（上层任务参考，不直接等于第一层）
     auv::StateVec _xref{};
@@ -715,6 +723,14 @@ bool AuvHopf::init()
     _telem.init();
 
     PX4_INFO("auv_hopf started, profile=%s", _parameter_profile_name);
+
+    // 初始化向 PlotJuggler 推流的 UDP Socket
+    _udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+    _pj_addr.sin_family = AF_INET;
+    _pj_addr.sin_port = htons(9870); // 对应 PlotJuggler 设置的端口
+    inet_pton(AF_INET, "127.0.0.1", &_pj_addr.sin_addr); // 本机推本机
+
+
     return true;
 }
 
@@ -1058,6 +1074,21 @@ void AuvHopf::publish_debug(float dt)
     publish_scalar_debug("clipu", sat_dbg.tau_clip(0));
     publish_scalar_debug("clipv", sat_dbg.tau_clip(1));
     publish_scalar_debug("clipr", sat_dbg.tau_clip(2));
+
+    // 实时发送核心数据给 PlotJuggler
+    if (_udp_sock >= 0) {
+        char json_buf[512];
+        snprintf(json_buf, sizeof(json_buf),
+                 "{\"auv\":{\"x\":%.3f, \"y\":%.3f, \"z_x\":%.3f, \"z_y\":%.3f, \"d_true_sway\":%.3f, \"d_hat_sway\":%.3f, \"tube_error\":%.3f}}",
+                 (double)_x(0), (double)_x(1),
+                 (double)_z(0), (double)_z(1),
+                 (double)_d_true(1), (double)_d_hat(1),
+                 (double)_tube_tracking_error_norm);
+                 
+        sendto(_udp_sock, json_buf, strlen(json_buf), 0,
+               (struct sockaddr *)&_pj_addr, sizeof(_pj_addr));
+    }
+    
 }
 
 void AuvHopf::publish_scalar_debug(const char *key, float value)

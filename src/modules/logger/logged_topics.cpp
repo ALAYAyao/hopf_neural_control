@@ -45,190 +45,194 @@ using namespace px4::logger;
 
 void LoggedTopics::add_default_topics()
 {
-	add_topic("action_request");
-	add_topic("actuator_armed");
-	add_optional_topic("actuator_controls_status_0", 300);
-	add_topic("airspeed", 1000);
-	add_optional_topic("airspeed_validated", 200);
-	add_optional_topic("autotune_attitude_control_status", 100);
-	add_topic_multi("battery_info", 5000, 3);
-	add_optional_topic("camera_capture");
-	add_optional_topic("camera_trigger");
-	add_topic("cellular_status", 200);
-	add_topic("commander_state");
-	add_topic("config_overrides");
-	add_topic("cpuload");
-	add_topic("distance_sensor_mode_change_request");
-	add_topic("device_information", 900);
-	add_topic_multi("dronecan_node_status", 250);
-	add_optional_topic("external_ins_attitude");
-	add_optional_topic("external_ins_global_position");
-	add_optional_topic("external_ins_local_position");
-	add_topic("esc_status");
-	add_topic("failure_detector_status", 100);
-	add_topic("failsafe_flags");
-	add_optional_topic("follow_target", 500);
-	add_optional_topic("follow_target_estimator", 200);
-	add_optional_topic("follow_target_status", 400);
-	add_optional_topic("flaps_setpoint", 1000);
-	add_optional_topic("flight_phase_estimation", 1000);
-	add_optional_topic("fuel_tank_status", 10);
-	add_optional_topic("gain_compression", 100);
-	add_topic("gimbal_manager_set_attitude", 500);
-	add_optional_topic("generator_status");
-	add_topic("gps_dump");
-	add_optional_topic("gimbal_controls", 200);
-	add_optional_topic("gripper");
-	add_optional_topic_multi("heater_status");
-	add_topic("home_position");
-	add_topic("hover_thrust_estimate", 100);
-	add_topic("input_rc", 500);
-	add_optional_topic("internal_combustion_engine_control", 10);
-	add_optional_topic("internal_combustion_engine_status", 10);
-	add_optional_topic("iridiumsbd_status", 1000);
-	add_optional_topic("irlock_report", 1000);
-	add_optional_topic("landing_gear", 200);
-	add_optional_topic("landing_gear_wheel", 100);
-	add_optional_topic("landing_target_pose", 1000);
-	add_optional_topic("launch_detection_status", 200);
-	add_topic("logger_status", 200);
-	add_optional_topic("magnetometer_bias_estimate", 200);
-	add_topic("manual_control_setpoint", 200);
-	add_topic("manual_control_switches");
-	add_topic("mission_result");
-	add_topic("navigator_mission_item");
-	add_topic("navigator_status");
-	add_topic("offboard_control_mode", 100);
-	add_topic("onboard_computer_status", 10);
-	add_topic("parameter_update");
-	add_topic("position_controller_status", 500);
-	add_topic("position_controller_landing_status", 100);
-	add_optional_topic("pure_pursuit_status", 100);
-	add_topic("goto_setpoint", 200);
-	add_topic("position_setpoint_triplet", 200);
-	add_optional_topic("px4io_status");
-	add_topic("radio_status");
-	add_optional_topic("rover_attitude_setpoint", 100);
-	add_optional_topic("rover_attitude_status", 100);
-	add_optional_topic("rover_position_setpoint", 100);
-	add_optional_topic("rover_rate_setpoint", 100);
-	add_optional_topic("rover_rate_status", 100);
-	add_optional_topic("rover_speed_setpoint", 100);
-	add_optional_topic("rover_speed_status", 100);
-	add_optional_topic("rover_steering_setpoint", 100);
-	add_optional_topic("rover_throttle_setpoint", 100);
-	add_topic("rtl_time_estimate", 1000);
-	add_topic("rtl_status", 2000);
-	add_optional_topic("sensor_airflow", 100);
-	add_topic("sensor_combined");
-	add_optional_topic("sensor_correction");
-	add_optional_topic("sensor_gyro_fft", 50);
-	add_topic("sensor_selection");
-	add_topic("sensors_status_imu", 200);
-	add_optional_topic("spoilers_setpoint", 1000);
-	add_topic("system_power", 500);
-	add_optional_topic("takeoff_status", 1000);
-	add_optional_topic("tecs_status", 200);
-	add_optional_topic("tiltrotor_extra_controls", 100);
-	add_topic("trajectory_setpoint", 200);
-	add_topic("transponder_report");
-	add_topic("vehicle_acceleration", 50);
-	add_topic("vehicle_air_data", 200);
-	add_topic("vehicle_angular_velocity", 20);
-	add_topic("vehicle_attitude", 50);
-	add_topic("vehicle_attitude_setpoint", 50);
-	add_topic("vehicle_command");
-	add_topic("vehicle_command_ack");
-	add_topic("vehicle_constraints", 1000);
-	add_topic("vehicle_control_mode");
-	add_topic("vehicle_global_position", 200);
-	add_topic("vehicle_gps_position", 100);
-	add_topic("vehicle_land_detected");
-	add_topic("vehicle_local_position", 100);
-	add_topic("vehicle_local_position_setpoint", 100);
-	add_topic("vehicle_magnetometer", 200);
-	add_topic("vehicle_rates_setpoint", 20);
-	add_topic("vehicle_roi", 1000);
-	add_topic("vehicle_status");
-	add_topic("vtx");
-	add_optional_topic("vtol_vehicle_status", 200);
-	add_topic("wind", 1000);
-	add_topic("fixed_wing_lateral_setpoint");
-	add_topic("fixed_wing_longitudinal_setpoint");
-	add_topic("longitudinal_control_configuration");
-	add_topic("lateral_control_configuration");
-	add_optional_topic("fixed_wing_lateral_guidance_status", 100);
-	add_optional_topic("fixed_wing_lateral_status", 100);
-	add_optional_topic("fixed_wing_runway_control", 100);
+	// === 强行塞入我的 AUV 自定义数据 ===
+    add_topic("auv_hopf_status");
+    add_topic("debug_key_value");
 
-	// multi topics
-	add_optional_topic_multi("actuator_outputs", 100, 3);
-	add_optional_topic_multi("airspeed_wind", 1000, 4);
-	add_optional_topic_multi("control_allocator_status", 200, 2);
-	add_optional_topic_multi("rate_ctrl_status", 200, 2);
-	add_optional_topic_multi("sensor_hygrometer", 500, 4);
-	add_optional_topic_multi("sensor_temp", 100, 4);
-	add_optional_topic_multi("rpm", 200);
-	add_topic_multi("timesync_status", 1000, 3);
-	add_optional_topic_multi("telemetry_status", 1000, 4);
+	// add_topic("action_request");
+	// add_topic("actuator_armed");
+	// add_optional_topic("actuator_controls_status_0", 300);
+	// add_topic("airspeed", 1000);
+	// add_optional_topic("airspeed_validated", 200);
+	// add_optional_topic("autotune_attitude_control_status", 100);
+	// add_topic_multi("battery_info", 5000, 3);
+	// add_optional_topic("camera_capture");
+	// add_optional_topic("camera_trigger");
+	// add_topic("cellular_status", 200);
+	// add_topic("commander_state");
+	// add_topic("config_overrides");
+	// add_topic("cpuload");
+	// add_topic("distance_sensor_mode_change_request");
+	// add_topic("device_information", 900);
+	// add_topic_multi("dronecan_node_status", 250);
+	// add_optional_topic("external_ins_attitude");
+	// add_optional_topic("external_ins_global_position");
+	// add_optional_topic("external_ins_local_position");
+	// add_topic("esc_status");
+	// add_topic("failure_detector_status", 100);
+	// add_topic("failsafe_flags");
+	// add_optional_topic("follow_target", 500);
+	// add_optional_topic("follow_target_estimator", 200);
+	// add_optional_topic("follow_target_status", 400);
+	// add_optional_topic("flaps_setpoint", 1000);
+	// add_optional_topic("flight_phase_estimation", 1000);
+	// add_optional_topic("fuel_tank_status", 10);
+	// add_optional_topic("gain_compression", 100);
+	// add_topic("gimbal_manager_set_attitude", 500);
+	// add_optional_topic("generator_status");
+	// add_topic("gps_dump");
+	// add_optional_topic("gimbal_controls", 200);
+	// add_optional_topic("gripper");
+	// add_optional_topic_multi("heater_status");
+	// add_topic("home_position");
+	// add_topic("hover_thrust_estimate", 100);
+	// add_topic("input_rc", 500);
+	// add_optional_topic("internal_combustion_engine_control", 10);
+	// add_optional_topic("internal_combustion_engine_status", 10);
+	// add_optional_topic("iridiumsbd_status", 1000);
+	// add_optional_topic("irlock_report", 1000);
+	// add_optional_topic("landing_gear", 200);
+	// add_optional_topic("landing_gear_wheel", 100);
+	// add_optional_topic("landing_target_pose", 1000);
+	// add_optional_topic("launch_detection_status", 200);
+	// add_topic("logger_status", 200);
+	// add_optional_topic("magnetometer_bias_estimate", 200);
+	// add_topic("manual_control_setpoint", 200);
+	// add_topic("manual_control_switches");
+	// add_topic("mission_result");
+	// add_topic("navigator_mission_item");
+	// add_topic("navigator_status");
+	// add_topic("offboard_control_mode", 100);
+	// add_topic("onboard_computer_status", 10);
+	// add_topic("parameter_update");
+	// add_topic("position_controller_status", 500);
+	// add_topic("position_controller_landing_status", 100);
+	// add_optional_topic("pure_pursuit_status", 100);
+	// add_topic("goto_setpoint", 200);
+	// add_topic("position_setpoint_triplet", 200);
+	// add_optional_topic("px4io_status");
+	// add_topic("radio_status");
+	// add_optional_topic("rover_attitude_setpoint", 100);
+	// add_optional_topic("rover_attitude_status", 100);
+	// add_optional_topic("rover_position_setpoint", 100);
+	// add_optional_topic("rover_rate_setpoint", 100);
+	// add_optional_topic("rover_rate_status", 100);
+	// add_optional_topic("rover_speed_setpoint", 100);
+	// add_optional_topic("rover_speed_status", 100);
+	// add_optional_topic("rover_steering_setpoint", 100);
+	// add_optional_topic("rover_throttle_setpoint", 100);
+	// add_topic("rtl_time_estimate", 1000);
+	// add_topic("rtl_status", 2000);
+	// add_optional_topic("sensor_airflow", 100);
+	// add_topic("sensor_combined");
+	// add_optional_topic("sensor_correction");
+	// add_optional_topic("sensor_gyro_fft", 50);
+	// add_topic("sensor_selection");
+	// add_topic("sensors_status_imu", 200);
+	// add_optional_topic("spoilers_setpoint", 1000);
+	// add_topic("system_power", 500);
+	// add_optional_topic("takeoff_status", 1000);
+	// add_optional_topic("tecs_status", 200);
+	// add_optional_topic("tiltrotor_extra_controls", 100);
+	// add_topic("trajectory_setpoint", 200);
+	// add_topic("transponder_report");
+	// add_topic("vehicle_acceleration", 50);
+	// add_topic("vehicle_air_data", 200);
+	// add_topic("vehicle_angular_velocity", 20);
+	// add_topic("vehicle_attitude", 50);
+	// add_topic("vehicle_attitude_setpoint", 50);
+	// add_topic("vehicle_command");
+	// add_topic("vehicle_command_ack");
+	// add_topic("vehicle_constraints", 1000);
+	// add_topic("vehicle_control_mode");
+	// add_topic("vehicle_global_position", 200);
+	// add_topic("vehicle_gps_position", 100);
+	// add_topic("vehicle_land_detected");
+	// add_topic("vehicle_local_position", 100);
+	// add_topic("vehicle_local_position_setpoint", 100);
+	// add_topic("vehicle_magnetometer", 200);
+	// add_topic("vehicle_rates_setpoint", 20);
+	// add_topic("vehicle_roi", 1000);
+	// add_topic("vehicle_status");
+	// add_topic("vtx");
+	// add_optional_topic("vtol_vehicle_status", 200);
+	// add_topic("wind", 1000);
+	// add_topic("fixed_wing_lateral_setpoint");
+	// add_topic("fixed_wing_longitudinal_setpoint");
+	// add_topic("longitudinal_control_configuration");
+	// add_topic("lateral_control_configuration");
+	// add_optional_topic("fixed_wing_lateral_guidance_status", 100);
+	// add_optional_topic("fixed_wing_lateral_status", 100);
+	// add_optional_topic("fixed_wing_runway_control", 100);
 
-	// EKF multi topics
-	{
-		// optionally log all estimator* topics at minimal rate
-		const uint16_t kEKFVerboseIntervalMilliseconds = 500; // 2 Hz
-		const struct orb_metadata *const *topic_list = orb_get_topics();
+	// // multi topics
+	// add_optional_topic_multi("actuator_outputs", 100, 3);
+	// add_optional_topic_multi("airspeed_wind", 1000, 4);
+	// add_optional_topic_multi("control_allocator_status", 200, 2);
+	// add_optional_topic_multi("rate_ctrl_status", 200, 2);
+	// add_optional_topic_multi("sensor_hygrometer", 500, 4);
+	// add_optional_topic_multi("sensor_temp", 100, 4);
+	// add_optional_topic_multi("rpm", 200);
+	// add_topic_multi("timesync_status", 1000, 3);
+	// add_optional_topic_multi("telemetry_status", 1000, 4);
 
-		for (size_t i = 0; i < orb_topics_count(); i++) {
-			if (strncmp(topic_list[i]->o_name, "estimator", 9) == 0) {
-				add_optional_topic_multi(topic_list[i]->o_name, kEKFVerboseIntervalMilliseconds);
-			}
-		}
-	}
+	// // EKF multi topics
+	// {
+	// 	// optionally log all estimator* topics at minimal rate
+	// 	const uint16_t kEKFVerboseIntervalMilliseconds = 500; // 2 Hz
+	// 	const struct orb_metadata *const *topic_list = orb_get_topics();
 
-	// important EKF topics (higher rate)
-	add_optional_topic("estimator_selector_status", 10);
-	add_optional_topic_multi("estimator_event_flags", 10);
-	add_optional_topic_multi("estimator_optical_flow_vel", 200);
-	add_optional_topic_multi("estimator_sensor_bias", 1000);
-	add_optional_topic_multi("estimator_status", 200);
-	add_optional_topic_multi("estimator_status_flags", 10);
-	add_optional_topic_multi("yaw_estimator_status", 1000);
+	// 	for (size_t i = 0; i < orb_topics_count(); i++) {
+	// 		if (strncmp(topic_list[i]->o_name, "estimator", 9) == 0) {
+	// 			add_optional_topic_multi(topic_list[i]->o_name, kEKFVerboseIntervalMilliseconds);
+	// 		}
+	// 	}
+	// }
 
-	// log all raw sensors at minimal rate (at least 1 Hz)
-	add_topic_multi("battery_status", 200, 3);
-	add_topic_multi("differential_pressure", 1000, 2);
-	add_topic_multi("distance_sensor", 1000, 2);
-	add_optional_topic_multi("sensor_accel", 1000, 4);
-	add_topic_multi("sensor_baro", 1000, 4);
-	add_topic_multi("sensor_gps", 1000, 2);
-	add_topic_multi("sensor_gnss_relative", 1000, 1);
-	add_optional_topic_multi("sensor_gyro", 1000, 4);
-	add_topic_multi("sensor_mag", 1000, 4);
-	add_topic_multi("sensor_optical_flow", 1000, 2);
+	// // important EKF topics (higher rate)
+	// add_optional_topic("estimator_selector_status", 10);
+	// add_optional_topic_multi("estimator_event_flags", 10);
+	// add_optional_topic_multi("estimator_optical_flow_vel", 200);
+	// add_optional_topic_multi("estimator_sensor_bias", 1000);
+	// add_optional_topic_multi("estimator_status", 200);
+	// add_optional_topic_multi("estimator_status_flags", 10);
+	// add_optional_topic_multi("yaw_estimator_status", 1000);
 
-	add_topic_multi("vehicle_imu", 500, 4);
-	add_topic_multi("vehicle_imu_status", 1000, 4);
-	add_optional_topic_multi("vehicle_magnetometer", 500, 4);
-	add_topic("vehicle_optical_flow", 500);
-	add_topic_multi("aux_global_position", 500);
-	add_optional_topic("pps_capture");
+	// // log all raw sensors at minimal rate (at least 1 Hz)
+	// add_topic_multi("battery_status", 200, 3);
+	// add_topic_multi("differential_pressure", 1000, 2);
+	// add_topic_multi("distance_sensor", 1000, 2);
+	// add_optional_topic_multi("sensor_accel", 1000, 4);
+	// add_topic_multi("sensor_baro", 1000, 4);
+	// add_topic_multi("sensor_gps", 1000, 2);
+	// add_topic_multi("sensor_gnss_relative", 1000, 1);
+	// add_optional_topic_multi("sensor_gyro", 1000, 4);
+	// add_topic_multi("sensor_mag", 1000, 4);
+	// add_topic_multi("sensor_optical_flow", 1000, 2);
 
-	// additional control allocation logging
-	add_topic("actuator_motors", 100);
-	add_topic("actuator_servos", 100);
-	add_topic_multi("vehicle_thrust_setpoint", 20, 2);
-	add_topic_multi("vehicle_torque_setpoint", 20, 2);
+	// add_topic_multi("vehicle_imu", 500, 4);
+	// add_topic_multi("vehicle_imu_status", 1000, 4);
+	// add_optional_topic_multi("vehicle_magnetometer", 500, 4);
+	// add_topic("vehicle_optical_flow", 500);
+	// add_topic_multi("aux_global_position", 500);
+	// add_optional_topic("pps_capture");
+
+	// // additional control allocation logging
+	// add_topic("actuator_motors", 100);
+	// add_topic("actuator_servos", 100);
+	// add_topic_multi("vehicle_thrust_setpoint", 20, 2);
+	// add_topic_multi("vehicle_torque_setpoint", 20, 2);
 
 	// SYS_HITL: default ground truth logging for simulation
-	int32_t sys_hitl = 0;
-	param_get(param_find("SYS_HITL"), &sys_hitl);
+	// int32_t sys_hitl = 0;
+	// param_get(param_find("SYS_HITL"), &sys_hitl);
 
-	if (sys_hitl >= 1) {
-		add_topic("vehicle_angular_velocity_groundtruth", 10);
-		add_topic("vehicle_attitude_groundtruth", 10);
-		add_topic("vehicle_global_position_groundtruth", 100);
-		add_topic("vehicle_local_position_groundtruth", 20);
-	}
+	// if (sys_hitl >= 1) {
+	// 	add_topic("vehicle_angular_velocity_groundtruth", 10);
+	// 	add_topic("vehicle_attitude_groundtruth", 10);
+	// 	add_topic("vehicle_global_position_groundtruth", 100);
+	// 	add_topic("vehicle_local_position_groundtruth", 20);
+	// }
 
 #ifdef CONFIG_ARCH_BOARD_PX4_SITL
 	add_topic("fw_virtual_attitude_setpoint");
