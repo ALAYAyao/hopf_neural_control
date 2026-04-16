@@ -149,74 +149,11 @@ struct WaveForceModelParams {
 };
 
 // ==================================================
-// 约束参数
+// 执行层 / 任务层参数
 // ==================================================
-
-/**
- * @brief AUV 约束参数
- *
- * 当前主要作为统一的约束配置入口。
- * 后续若需要显式状态/输入约束建模，可继续扩展。
- */
-struct AuvConstraintParams {
-    // 输入约束
-    float tau_u_min;
-    float tau_u_max;
-
-    float tau_v_min;
-    float tau_v_max;
-
-    float tau_r_min;
-    float tau_r_max;
-
-    // 状态约束
-    float psi_min;
-    float psi_max;
-
-    float u_min;
-    float u_max;
-
-    float v_min;
-    float v_max;
-
-    float r_min;
-    float r_max;
-};
-
-// ==================================================
-// Tube / ancillary feedback 参数
-// ==================================================
-
-/**
- * @brief Tube-MPC 辅助反馈与执行层限幅参数
- *
- * 注意：
- * 1. 这里只保留 ancillary / allocation 层真正需要的反馈增益与物理限幅；
- * 2. 质量/惯量参数不再重复保存，统一由 AuvPlantParams 提供；
- * 3. 这样可以避免 M11/M22/M33 与 m_u/m_v/Iz 长期漂移。
- */
-struct TubeFeedbackParams {
-    // 位置 / 姿态相关比例反馈
-    float Kp11;
-    float Kp22;
-    float Kp33;
-
-    // 速度反馈
-    float Kv11;
-    float Kv22;
-    float Kv33;
-
-    // 执行层物理限幅
-    float tau_u_max_phys;
-    float tau_v_max_phys;
-    float tau_r_max_phys;
-};
-
 
 /**
  * @brief 执行层物理限幅参数
- *
- * 与 TubeFeedbackParams 拆开保存，避免“反馈器参数”和“执行器硬限幅”继续绑在一起。
  */
 struct PhysicalActuatorLimits {
     float tau_u_min;
@@ -247,19 +184,18 @@ struct ExperimentConfig {
 /**
  * @brief 参数口径分组
  *
- * EngineeringDefault: 面向当前工程原型迭代。
- * PaperReproduction: 面向论文复现实验口径。
+ * 当前版本只保留一套工程默认参数。
+ * 若后续论文复现需要单独恢复一套口径，再在此基础上扩展即可。
  */
 enum class ParameterProfile : uint8_t {
     EngineeringDefault = 0,
-    PaperReproduction = 1,
 };
 
 /**
  * @brief 主模块一次性装载的参数包
  *
- * 这样可以显式区分“论文复现参数组”和“工程默认参数组”，
- * 避免后续主模块继续从不同默认工厂里零散拼装，导致口径漂移。
+ * 当前统一由一套工程默认参数集中装载，避免主模块从多个默认工厂零散拼装，
+ * 导致参数口径漂移。
  */
 
 // ==================================================
@@ -337,7 +273,6 @@ struct RuntimeProfileBundle {
     WaveEnvParams wave_env;
     WaveForceModelParams wave_model;
 
-    TubeFeedbackParams tube_feedback;
     PhysicalActuatorLimits physical_limits;
     MissionReferenceParams mission_ref;
     ExperimentConfig experiment;
@@ -362,13 +297,15 @@ inline AuvPlantParams default_plant_params()
 {
     AuvPlantParams p{};
 
-    p.m_u = 31.8381f;
-    p.m_v = 60.4368f;
-    p.Iz  = 7.4501f;
+    // 质量与附加质量 (单位: kg)
+    p.m_u = 25.0f;  // 纵向质量 = 20kg(干重) + 5kg(附加质量)
+    p.m_v = 35.0f;  // 横向质量 = 20kg(干重) + 15kg(附加质量)
+    p.Iz  = 3.5f;   // 转动惯量 (约 0.5米长的方形/圆柱体，含附加惯量)
 
-    p.Du  = 1.5919f;
-    p.Dv  = 3.0218f;
-    p.Dr  = 7.4501f;
+    // 线性阻尼 (单位: N/(m/s) 和 Nm/(rad/s))
+    p.Du  = 12.0f;  // 纵向流体阻尼
+    p.Dv  = 25.0f;  // 横向流体阻尼 (横向面积更大，阻尼更大)
+    p.Dr  = 8.0f;   // 艏摇旋转阻尼
 
     return p;
 }
@@ -469,66 +406,22 @@ inline WaveForceModelParams default_wave_force_model_params()
 {
     WaveForceModelParams p{};
 
-    p.rho = 1026.0f;
-    p.L = 1.6f;
-    p.D_auv = 0.19f;
-    p.cd = 0.42f;
-    p.cm1 = 1.03f;
-    p.cm2 = 1.9652f;
-    p.g = 9.7803267714f;
-    p.h = 0.1f;
-    p.scale_factor = 0.5f;
+// --- 物理常数 ---
+    p.rho = 1025.0f;           // 海水密度 (淡水测试请改为 1000.0f)
+    p.g   = 9.81f;             // 重力加速度
 
-    return p;
-}
+    // --- 几何特征 (假设典型的小型框架式 AUV) ---
+    p.L     = 0.5f;            // 艇长 50cm
+    p.D_auv = 0.3f;            // 等效直径 30cm
 
-inline AuvConstraintParams default_constraint_params()
-{
-    AuvConstraintParams c{};
+    // --- 水动力学特征 ---
+    p.cd  = 1.0f;              // 框架式 AUV 阻力较大
+    p.cm1 = 0.15f;             // 纵向附加质量系数较小
+    p.cm2 = 0.9f;              // 横向附加质量系数较大 (接近圆柱横截面)
 
-    c.tau_u_min = -50.0f;
-    c.tau_u_max =  50.0f;
-
-    c.tau_v_min = -50.0f;
-    c.tau_v_max =  50.0f;
-
-    c.tau_r_min = -10.0f;
-    c.tau_r_max =  10.0f;
-
-    c.psi_min = -3.1415926f;
-    c.psi_max =  3.1415926f;
-
-    c.u_min = -3.0f;
-    c.u_max =  3.0f;
-
-    c.v_min = -3.0f;
-    c.v_max =  3.0f;
-
-    c.r_min = -2.0f;
-    c.r_max =  2.0f;
-
-    return c;
-}
-
-inline TubeFeedbackParams default_tube_feedback_params()
-{
-    TubeFeedbackParams p{};
-
-    // ancillary_and_allocation 中的 Kp
-    p.Kp11 = 8.0f;
-    p.Kp22 = 8.0f;
-    p.Kp33 = 4.0f;
-
-    // ancillary_and_allocation 中的 Kv
-    p.Kv11 = 15.0f;
-    p.Kv22 = 15.0f;
-    p.Kv33 = 8.0f;
-
-    // 物理限幅
-    p.tau_u_max_phys = 50.0f;
-    p.tau_v_max_phys = 50.0f;
-    p.tau_r_max_phys = 10.0f;
-
+    // --- 算法参数 ---
+    p.h = p.L / 10.0f;         // 离散步长 0.05m (分成 10 个切片)
+    p.scale_factor = 1.0f;     // 初始波浪扰动缩放保持原样
     return p;
 }
 
@@ -536,31 +429,9 @@ inline PhysicalActuatorLimits default_physical_actuator_limits()
 {
     PhysicalActuatorLimits p{};
 
-    p.tau_u_min = -50.0f;
-    p.tau_u_max =  50.0f;
-
-    p.tau_v_min = -50.0f;
-    p.tau_v_max =  50.0f;
-
-    p.tau_r_min = -10.0f;
-    p.tau_r_max =  10.0f;
-
-    return p;
-}
-
-inline PhysicalActuatorLimits paper_reproduction_physical_actuator_limits()
-{
-    PhysicalActuatorLimits p{};
-
-    p.tau_u_min = -50.0f;
-    p.tau_u_max =  50.0f;
-
-    p.tau_v_min = -50.0f;
-    p.tau_v_max =  50.0f;
-
-    // 论文当前给出的物理 yaw 力矩限幅为 ±20
-    p.tau_r_min = -20.0f;
-    p.tau_r_max =  20.0f;
+    p.tau_u_min = -60.0f; p.tau_u_max =  60.0f;
+    p.tau_v_min = -50.0f; p.tau_v_max =  50.0f;
+    p.tau_r_min = -12.0f; p.tau_r_max =  12.0f;
 
     return p;
 }
@@ -568,16 +439,8 @@ inline PhysicalActuatorLimits paper_reproduction_physical_actuator_limits()
 inline MissionReferenceParams default_mission_reference_params()
 {
     MissionReferenceParams p{};
-    p.circle_radius = 10.0f;
+    p.circle_radius = 30.0f;
     p.circle_omega  = 0.02f;
-    return p;
-}
-
-inline MissionReferenceParams paper_reproduction_mission_reference_params()
-{
-    MissionReferenceParams p{};
-    p.circle_radius = 20.0f;
-    p.circle_omega  = 0.05f;
     return p;
 }
 
@@ -588,35 +451,14 @@ inline ExperimentConfig default_experiment_config()
     return cfg;
 }
 
-inline ExperimentConfig paper_reproduction_experiment_config()
-{
-    ExperimentConfig cfg{};
-    cfg.sim_time_limit = 60.0f;
-    return cfg;
-}
-
-inline AuvPlantParams paper_reproduction_plant_params()
-{
-    AuvPlantParams p{};
-
-    p.m_u = 70.0f;
-    p.m_v = 75.0f;
-    p.Iz  = 12.501f;
-
-    p.Du  = 15.919f;
-    p.Dv  = 20.218f;
-    p.Dr  = 10.4501f;
-
-    return p;
-}
-
 inline MpcWeightParams default_central_mpc_weight_params()
 {
     MpcWeightParams w{};
 
-    const float q[NX] = {2000.0f, 2000.0f, 1000.0f, 0.2f, 0.2f, 0.2f};
-    const float r[NU] = {0.1f, 0.1f, 0.1f};
-    const float p[NX] = {2000.0f, 2000.0f, 1000.0f, 0.2f, 0.2f, 0.2f};
+    const float q[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
+    // 增加推力惩罚，阻止满舵飙车
+    const float r[NU] = {2.0f, 2.0f, 5.0f}; 
+    const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
 
     for (int i = 0; i < NX; ++i) {
         w.Q[i] = q[i];
@@ -635,9 +477,10 @@ inline MpcWeightParams default_ancillary_mpc_weight_params()
     MpcWeightParams w{};
 
     // ancillary 层相对更关注贴近 z*，同时不过度惩罚控制修正
-    const float q[NX] = {2600.0f, 2600.0f, 1400.0f, 0.5f, 0.5f, 0.5f};
-    const float r[NU] = {0.08f, 0.08f, 0.08f};
-    const float p[NX] = {2600.0f, 2600.0f, 1400.0f, 0.5f, 0.5f, 0.5f};
+    const float q[NX] = {1500.0f, 1500.0f, 1000.0f, 0.5f, 0.5f, 0.5f};
+    // 推力惩罚可以低一点，允许在浪大的时候“瞬间发力”
+    const float r[NU] = {0.5f, 0.5f, 1.0f}; 
+    const float p[NX] = {1500.0f, 1500.0f, 1000.0f, 0.5f, 0.5f, 0.5f};
 
     for (int i = 0; i < NX; ++i) {
         w.Q[i] = q[i];
@@ -656,21 +499,9 @@ inline MpcBoundsParams default_central_mpc_bounds_params()
     MpcBoundsParams b{};
 
     // central-path 采用 tightened nominal input set V，为 ancillary 留出调节余量
-    b.umin[0] = -28.0f;
-    b.umin[1] = -28.0f;
-    b.umin[2] =  -7.0f;
-
-    b.umax[0] =  28.0f;
-    b.umax[1] =  28.0f;
-    b.umax[2] =   7.0f;
-
-    b.pmin[0] = -100.0f;
-    b.pmin[1] = -100.0f;
-    b.pmin[2] =  -50.0f;
-
-    b.pmax[0] =  100.0f;
-    b.pmax[1] =  100.0f;
-    b.pmax[2] =   50.0f;
+    b.umin[0] = -45.0f; b.umax[0] =  45.0f;
+    b.umin[1] = -35.0f; b.umax[1] =  35.0f;
+    b.umin[2] =  -9.0f; b.umax[2] =   9.0f;
 
     return b;
 }
@@ -679,23 +510,12 @@ inline MpcBoundsParams default_ancillary_mpc_bounds_params()
 {
     MpcBoundsParams b{};
 
-    // ancillary 层可比 nominal 层更宽，但仍保留到物理限幅之前的一层余量
-    b.umin[0] = -40.0f;
-    b.umin[1] = -40.0f;
-    b.umin[2] =  -9.0f;
-
-    b.umax[0] =  40.0f;
-    b.umax[1] =  40.0f;
-    b.umax[2] =   9.0f;
-
-    b.pmin[0] = -100.0f;
-    b.pmin[1] = -100.0f;
-    b.pmin[2] =  -50.0f;
-
-    b.pmax[0] =  100.0f;
-    b.pmax[1] =  100.0f;
-    b.pmax[2] =   50.0f;
-
+  // --- 1. 控制器输出约束 (umin / umax) ---
+    // ancillary 层直接面对真实状态，它的约束需要比 nominal 层（48, 32, 9）更宽。
+    // 我们将其设置在非常接近物理极限（60, 40, 12）的位置，留下最后一点防饱和余量。
+    b.umin[0] = -55.0f; b.umax[0] =  55.0f;
+    b.umin[1] = -45.0f; b.umax[1] =  45.0f;
+    b.umin[2] = -11.0f; b.umax[2] =  11.0f;
     return b;
 }
 
@@ -718,25 +538,34 @@ inline MpcStateBoundsParams default_central_state_bounds_params()
     MpcStateBoundsParams b = default_mpc_state_bounds_params();
     b.enable_soft_bounds = true;
 
-    // X/Y 当前不做位置盒约束；先显式约束与安全更直接相关的姿态与速度
-    b.penalty[0] = 0.0f;
-    b.penalty[1] = 0.0f;
+   // --- 1. 绝对坐标与姿态 (X, Y, psi) ---
+    // AUV 需要全海域航行（X/Y无界），并且要能画整圆（psi无界）。
+    // 将惩罚设为 0，意味着解除状态空间绝对位置的软约束。
+    // (让 MPC 的 Q 矩阵专注于消除与参考点的“相对误差”，而不是限制绝对坐标)
+    b.penalty[0] = 0.0f; // X 不限
+    b.penalty[1] = 0.0f; // Y 不限
+    b.penalty[2] = 0.0f; // psi 不限 (重点修复：允许自由打转和画圆！)
 
-    b.xmin[2] = -2.70f;
-    b.xmax[2] =  2.70f;
-    b.penalty[2] = 1200.0f;
+    // --- 2. 纵向速度 (u) ---
+    // 小型 AUV 的安全巡航速度通常在 1.0 m/s 左右。
+    // 这里限制名义层最高规划速度为 1.2 m/s，确保电机绝对能达标。
+    b.xmin[3] = -1.20f;
+    b.xmax[3] =  1.20f;
+    b.penalty[3] = 250.0f;
 
-    b.xmin[3] = -2.40f;
-    b.xmax[3] =  2.40f;
-    b.penalty[3] = 220.0f;
+    // --- 3. 横向速度 (v) ---
+    // 全驱 AUV 虽然能横向平移，但横向迎流面积大，阻力极大。
+    // 限制最高横移速度为 0.8 m/s，防止规划出不切实际的侧滑轨迹。
+    b.xmin[4] = -0.80f;
+    b.xmax[4] =  0.80f;
+    b.penalty[4] = 250.0f;
 
-    b.xmin[4] = -2.40f;
-    b.xmax[4] =  2.40f;
-    b.penalty[4] = 220.0f;
-
-    b.xmin[5] = -1.60f;
-    b.xmax[5] =  1.60f;
-    b.penalty[5] = 180.0f;
+    // --- 4. 艏摇角速度 (r) ---
+    // 限制在 1.0 rad/s (约 57度/秒)。
+    // 这个速度足够灵活，同时又能防止 AUV 像陀螺一样疯转导致传感器(IMU)晕眩。
+    b.xmin[5] = -1.00f;
+    b.xmax[5] =  1.00f;
+    b.penalty[5] = 200.0f;
 
     return b;
 }
@@ -746,24 +575,32 @@ inline MpcStateBoundsParams default_ancillary_state_bounds_params()
     MpcStateBoundsParams b = default_mpc_state_bounds_params();
     b.enable_soft_bounds = true;
 
+  // --- 1. 位置与姿态 (X, Y, psi) ---
+    // 和名义层一样，绝对不限制全局坐标和航向角，允许 AUV 满世界跑和自由画整圆。
     b.penalty[0] = 0.0f;
     b.penalty[1] = 0.0f;
+    b.penalty[2] = 0.0f; // 彻底解除画圆时的 180度/pi 封印
 
-    b.xmin[2] = -2.95f;
-    b.xmax[2] =  2.95f;
-    b.penalty[2] = 1800.0f;
+    // --- 2. 纵向速度 (u) 物理极限防线 ---
+    // 名义层限速是 1.2m/s。
+    // 这里允许遇到大浪时，瞬间被推到 1.5m/s。但超过 1.5m/s 就必须遭受重罚拉回！
+    b.xmin[3] = -1.50f;
+    b.xmax[3] =  1.50f;
+    b.penalty[3] = 300.0f;
 
-    b.xmin[3] = -2.80f;
-    b.xmax[3] =  2.80f;
-    b.penalty[3] = 320.0f;
+    // --- 3. 横向速度 (v) 物理极限防线 ---
+    // 名义层规划横移最大 0.8m/s。
+    // 真实情况横向受流面积大，允许瞬间漂移到 1.2m/s。
+    b.xmin[4] = -1.20f;
+    b.xmax[4] =  1.20f;
+    b.penalty[4] = 300.0f;
 
-    b.xmin[4] = -2.80f;
-    b.xmax[4] =  2.80f;
-    b.penalty[4] = 320.0f;
-
-    b.xmin[5] = -1.85f;
-    b.xmax[5] =  1.85f;
-    b.penalty[5] = 260.0f;
+    // --- 4. 艏摇角速度 (r) 物理极限防线 ---
+    // 名义层转弯角速度最大 1.0 rad/s。
+    // 允许瞬间被海浪拍转到 1.5 rad/s (约85度/秒)，再大就要出安全事故了。
+    b.xmin[5] = -1.50f;
+    b.xmax[5] =  1.50f;
+    b.penalty[5] = 250.0f;
 
     return b;
 }
@@ -802,49 +639,7 @@ inline MpcConfig default_ancillary_mpc_config()
     return cfg;
 }
 
-inline MpcBoundsParams paper_reproduction_central_mpc_bounds_params()
-{
-    MpcBoundsParams b{};
-
-    // 论文给出 nominal tightened bounds = physical - margin
-    // 这里对应 [50, 50, 20] - [15, 15, 10] = [35, 35, 10]
-    b.umin[0] = -35.0f;
-    b.umin[1] = -35.0f;
-    b.umin[2] = -10.0f;
-
-    b.umax[0] =  35.0f;
-    b.umax[1] =  35.0f;
-    b.umax[2] =  10.0f;
-
-    b.pmin[0] = -100.0f;
-    b.pmin[1] = -100.0f;
-    b.pmin[2] =  -50.0f;
-
-    b.pmax[0] =  100.0f;
-    b.pmax[1] =  100.0f;
-    b.pmax[2] =   50.0f;
-
-    return b;
-}
-
-inline MpcBoundsParams paper_reproduction_ancillary_mpc_bounds_params()
-{
-    MpcBoundsParams b = paper_reproduction_central_mpc_bounds_params();
-
-    // 当前实现里 ancillary 层仍保留一层接近物理限幅的可调空间；
-    // 论文参数尚未把这一层单独展开，因此这里采用保守近物理配置。
-    b.umin[0] = -45.0f;
-    b.umin[1] = -45.0f;
-    b.umin[2] = -18.0f;
-
-    b.umax[0] =  45.0f;
-    b.umax[1] =  45.0f;
-    b.umax[2] =  18.0f;
-
-    return b;
-}
-
-inline RuntimeProfileBundle make_engineering_default_profile_bundle()
+inline RuntimeProfileBundle make_runtime_profile_bundle()
 {
     RuntimeProfileBundle bundle{};
     bundle.profile_name = "engineering_default";
@@ -854,7 +649,6 @@ inline RuntimeProfileBundle make_engineering_default_profile_bundle()
     bundle.wave_env = default_wave_env_params();
     bundle.wave_model = default_wave_force_model_params();
 
-    bundle.tube_feedback = default_tube_feedback_params();
     bundle.physical_limits = default_physical_actuator_limits();
     bundle.mission_ref = default_mission_reference_params();
     bundle.experiment = default_experiment_config();
@@ -872,97 +666,25 @@ inline RuntimeProfileBundle make_engineering_default_profile_bundle()
     return bundle;
 }
 
-inline RuntimeProfileBundle make_paper_reproduction_profile_bundle()
+// 兼容旧调用接口：当前只有一套工程默认参数，因此 profile 参数被忽略。
+inline const char *parameter_profile_name(ParameterProfile)
 {
-    RuntimeProfileBundle bundle{};
-    bundle.profile_name = "paper_reproduction";
-
-    bundle.plant = paper_reproduction_plant_params();
-    bundle.hopf = default_hopf_config();
-    bundle.wave_env = default_wave_env_params();
-    bundle.wave_model = default_wave_force_model_params();
-
-    bundle.tube_feedback = default_tube_feedback_params();
-    bundle.physical_limits = paper_reproduction_physical_actuator_limits();
-    bundle.mission_ref = paper_reproduction_mission_reference_params();
-    bundle.experiment = paper_reproduction_experiment_config();
-
-    bundle.central_weights = default_central_mpc_weight_params();
-    bundle.central_bounds = paper_reproduction_central_mpc_bounds_params();
-    bundle.central_state_bounds = default_central_state_bounds_params();
-    bundle.central_config = default_central_mpc_config();
-
-    bundle.ancillary_weights = default_ancillary_mpc_weight_params();
-    bundle.ancillary_bounds = paper_reproduction_ancillary_mpc_bounds_params();
-    bundle.ancillary_state_bounds = default_ancillary_state_bounds_params();
-    bundle.ancillary_config = default_ancillary_mpc_config();
-
-    return bundle;
+    return "engineering_default";
 }
 
-inline const char *parameter_profile_name(ParameterProfile profile)
+inline RuntimeProfileBundle make_runtime_profile_bundle(ParameterProfile)
 {
-    switch (profile) {
-    case ParameterProfile::PaperReproduction:
-        return "paper_reproduction";
-    case ParameterProfile::EngineeringDefault:
-    default:
-        return "engineering_default";
-    }
-}
-
-inline RuntimeProfileBundle make_runtime_profile_bundle(ParameterProfile profile)
-{
-    switch (profile) {
-    case ParameterProfile::PaperReproduction:
-        return make_paper_reproduction_profile_bundle();
-    case ParameterProfile::EngineeringDefault:
-    default:
-        return make_engineering_default_profile_bundle();
-    }
+    return make_runtime_profile_bundle();
 }
 
 inline MpcWeightParams default_mpc_weight_params()
 {
-    MpcWeightParams w{};
-
-    const float q[NX] = {2000.0f, 2000.0f, 1000.0f, 0.2f, 0.2f, 0.2f};
-    const float r[NU] = {0.1f, 0.1f, 0.1f};
-    const float p[NX] = {2000.0f, 2000.0f, 1000.0f, 0.2f, 0.2f, 0.2f};
-
-    for (int i = 0; i < NX; ++i) {
-        w.Q[i] = q[i];
-        w.P[i] = p[i];
-    }
-
-    for (int i = 0; i < NU; ++i) {
-        w.R[i] = r[i];
-    }
-
-    return w;
+    return default_ancillary_mpc_weight_params();
 }
 
 inline MpcBoundsParams default_mpc_bounds_params()
 {
-    MpcBoundsParams b{};
-
-    b.umin[0] = -35.0f;
-    b.umin[1] = -35.0f;
-    b.umin[2] = -10.0f;
-
-    b.umax[0] =  35.0f;
-    b.umax[1] =  35.0f;
-    b.umax[2] =  10.0f;
-
-    b.pmin[0] = -100.0f;
-    b.pmin[1] = -100.0f;
-    b.pmin[2] =  -50.0f;
-
-    b.pmax[0] =  100.0f;
-    b.pmax[1] =  100.0f;
-    b.pmax[2] =   50.0f;
-
-    return b;
+    return default_ancillary_mpc_bounds_params();
 }
 
 inline MpcConfig default_mpc_config()

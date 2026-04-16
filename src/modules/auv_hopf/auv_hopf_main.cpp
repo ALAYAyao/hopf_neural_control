@@ -438,6 +438,11 @@ float AuvHopf::sanitize_dt(float dt)
 void AuvHopf::reset_states()
 {
     _x.zero();
+
+    _x(0) = _mission_ref_params.circle_radius - 2.0f; 
+    _x(1) = 0.0f;
+    _x(2) = M_PI_F / 2.0f; // 车头朝正前方 (Y轴正向)
+    
     _z.zero();
     _xref.zero();
 
