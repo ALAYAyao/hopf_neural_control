@@ -568,7 +568,7 @@ inline PhysicalActuatorLimits paper_reproduction_physical_actuator_limits()
 inline MissionReferenceParams default_mission_reference_params()
 {
     MissionReferenceParams p{};
-    p.circle_radius = 30.0f;
+    p.circle_radius = 10.0f;
     p.circle_omega  = 0.02f;
     return p;
 }
@@ -967,22 +967,7 @@ inline MpcBoundsParams default_mpc_bounds_params()
 
 inline MpcConfig default_mpc_config()
 {
-    MpcConfig cfg{};
-
-    cfg.dt = 0.1f;
-    cfg.Thor = 1.0f;
-
-    // 与 dt=0.1, Thor=1.0 对应
-    cfg.Nhor = 11;
-
-    cfg.MaxGradIter = 2;
-    cfg.MaxMultIter = 1;
-
-    cfg.shift_control = true;
-    cfg.use_terminal_cost = true;
-    cfg.use_integral_cost = true;
-
-    return cfg;
+    return default_ancillary_mpc_config();
 }
 
 
