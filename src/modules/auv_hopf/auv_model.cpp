@@ -35,17 +35,14 @@ void AuvModel::set_plant_params(const auv::AuvPlantParams &plant)
  * 这样做的目的是避免航向角在积分过程中持续增长，
  * 导致数值上出现不必要的大角度跳变。
  */
+// 第 35 行附近
 float AuvModel::wrap_pi(float angle)
 {
-    while (angle > M_PI_F) {
-        angle -= 2.0f * M_PI_F;
+    float res = fmodf(angle + M_PI_F, 2.0f * M_PI_F);
+    if (res < 0.0f) {
+        res += 2.0f * M_PI_F;
     }
-
-    while (angle < -M_PI_F) {
-        angle += 2.0f * M_PI_F;
-    }
-
-    return angle;
+    return res - M_PI_F;
 }
 
 /**

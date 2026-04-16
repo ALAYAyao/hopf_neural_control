@@ -36,17 +36,14 @@ void WaveDisturbance::set_model_params(const auv::WaveForceModelParams &model_pa
     _model_params = model_params;
 }
 
+// 第 37 行附近
 float WaveDisturbance::wrap_to_pi(float a)
 {
-    while (a > M_PI_F) {
-        a -= 2.0f * M_PI_F;
+    float res = fmodf(a + M_PI_F, 2.0f * M_PI_F);
+    if (res < 0.0f) {
+        res += 2.0f * M_PI_F;
     }
-
-    while (a < -M_PI_F) {
-        a += 2.0f * M_PI_F;
-    }
-
-    return a;
+    return res - M_PI_F;
 }
 
 float WaveDisturbance::trapz(const float *x, const float *y, int n)
@@ -222,7 +219,7 @@ WaveDisturbance::WaveForceOutput WaveDisturbance::waveforce_sim(
         const float w_rel_dot = w_vert_dot - U_dot(2);
 
         // --- D. 计算切片受力 (严格还原 MATLAB 逻辑) ---
-        
+
         // 1. X 轴受力 (附加质量项每个切片都有)
         float dFx = rho * cm1 * Ax * u_rel_dot * h;
         // 严格还原 MATLAB: 阻力只加在首尾两端 (j==0 或 j==Data_num-1)
@@ -231,11 +228,11 @@ WaveDisturbance::WaveForceOutput WaveDisturbance::waveforce_sim(
         }
 
         // 2. Y 轴受力 (附加质量 + 圆柱侧向阻力)
-        const float dFy = rho * cm2 * Ay * v_rel_dot * h 
+        const float dFy = rho * cm2 * Ay * v_rel_dot * h
                         + 0.5f * rho * cd * D * v_rel * fabsf(v_rel) * h;
 
         // 3. Z 轴受力
-        const float dFz = rho * cm2 * Ay * w_rel_dot * h 
+        const float dFz = rho * cm2 * Ay * w_rel_dot * h
                         + 0.5f * rho * cd * D * w_rel * fabsf(w_rel) * h;
 
         // --- E. 积分累加 ---

@@ -456,7 +456,7 @@ inline MpcWeightParams default_central_mpc_weight_params()
 
     const float q[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
     // 增加推力惩罚，阻止满舵飙车
-    const float r[NU] = {2.0f, 2.0f, 5.0f}; 
+    const float r[NU] = {2.0f, 2.0f, 5.0f};
     const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
 
     for (int i = 0; i < NX; ++i) {
@@ -478,7 +478,7 @@ inline MpcWeightParams default_ancillary_mpc_weight_params()
     // ancillary 层相对更关注贴近 z*，同时不过度惩罚控制修正
     const float q[NX] = {1500.0f, 1500.0f, 1000.0f, 0.5f, 0.5f, 0.5f};
     // 推力惩罚可以低一点，允许在浪大的时候“瞬间发力”
-    const float r[NU] = {0.5f, 0.5f, 1.0f}; 
+    const float r[NU] = {0.5f, 0.5f, 1.0f};
     const float p[NX] = {1500.0f, 1500.0f, 1000.0f, 0.5f, 0.5f, 0.5f};
 
     for (int i = 0; i < NX; ++i) {

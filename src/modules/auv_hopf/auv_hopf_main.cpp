@@ -842,6 +842,21 @@ void AuvHopf::run()
         _tau_applied = _actuator_sat.apply(_tau_anc);
         _physical_clip_norm = input_norm(_actuator_sat.debug().tau_clip);
 
+        bool is_control_safe = true;
+        for (int i = 0; i < 3; i++) {
+            if (!PX4_ISFINITE(_tau_applied(i))) {
+                is_control_safe = false;
+                break;
+            }
+        }
+
+        if (!is_control_safe) {
+            PX4_ERR("CRITICAL: MPC generated NaN/Inf! Fallback to zero force.");
+            _tau_applied.zero(); // 强制输出 0 推力保命
+
+            // 可以选择在这里调用 _central_mpc.reset() 来重启求解器
+        }
+
         // 6) 推进真实状态
         _x = _model.step(_x, _tau_applied, _d_true, dt);
 
