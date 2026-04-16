@@ -74,13 +74,17 @@ static double soft_state_violation_grad(double x,
     return 0.0;
 }
 
-static double wrap_pi(double a)
+double wrap_pi(double angle)
 {
-    while (a > M_PI)  { a -= 2.0 * M_PI; }
-    while (a < -M_PI) { a += 2.0 * M_PI; }
-    return a;
+    // 使用 fmod (而不是 fmodf)
+    // 使用 M_PI (而不是 M_PI_F)
+    // 使用 2.0 和 0.0 (不带 f 后缀)
+    double res = fmod(angle + M_PI, 2.0 * M_PI);
+    if (res < 0.0) {
+        res += 2.0 * M_PI;
+    }
+    return res - M_PI;
 }
-
 static int get_stage_index(double t,
                            const typeGRAMPCparam *param,
                            const MpcOptim::UserParam *up)

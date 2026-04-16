@@ -25,7 +25,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-
+#include <unistd.h>
+#include <fcntl.h>
+#include <px4_platform_common/defines.h>
 /**
  * @file auv_hopf_main.cpp
  *
@@ -203,7 +205,6 @@ private:
                                        int nhor,
                                        const auv::MpcStateBoundsParams &bounds);
     void publish_debug(float dt);
-    void publish_scalar_debug(const char *key, float value);
 
     static float sanitize_dt(float dt);
     static float clampf(float v, float lo, float hi);
@@ -230,6 +231,12 @@ AuvHopf::~AuvHopf()
     perf_free(_perf_central_solve);
     perf_free(_perf_anc_solve);
     perf_free(_perf_total_run);
+
+    // [新增] 释放 UDP Socket 资源
+    if (_udp_sock >= 0) {
+        close(_udp_sock);
+        _udp_sock = -1;
+    }
 }
 
 float AuvHopf::clampf(float v, float lo, float hi)
@@ -245,17 +252,13 @@ float AuvHopf::clampf(float v, float lo, float hi)
     return v;
 }
 
-float AuvHopf::wrap_pi(float a)
+float AuvHopf::wrap_pi(float angle)
 {
-    while (a > M_PI_F) {
-        a -= 2.0f * M_PI_F;
+    float res = fmodf(angle + M_PI_F, 2.0f * M_PI_F);
+    if (res < 0.0f) {
+        res += 2.0f * M_PI_F;
     }
-
-    while (a < -M_PI_F) {
-        a += 2.0f * M_PI_F;
-    }
-
-    return a;
+    return res - M_PI_F;
 }
 
 float AuvHopf::input_norm(const auv::InputVec &v)
@@ -439,10 +442,10 @@ void AuvHopf::reset_states()
 {
     _x.zero();
 
-    _x(0) = _mission_ref_params.circle_radius - 2.0f; 
+    _x(0) = _mission_ref_params.circle_radius - 2.0f;
     _x(1) = 0.0f;
     _x(2) = M_PI_F / 2.0f; // 车头朝正前方 (Y轴正向)
-    
+
     _z.zero();
     _xref.zero();
 
@@ -731,9 +734,29 @@ bool AuvHopf::init()
 
     // 初始化向 PlotJuggler 推流的 UDP Socket
     _udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    _pj_addr.sin_family = AF_INET;
-    _pj_addr.sin_port = htons(9870); // 对应 PlotJuggler 设置的端口
-    inet_pton(AF_INET, "127.0.0.1", &_pj_addr.sin_addr); // 本机推本机
+
+    if (_udp_sock >= 0) {
+        // [大师建议：非阻塞模式]
+        // 即使网络出现丢包或缓冲区满，sendto 也会立即返回而不会卡住你的 AUV 控制主循环
+        int flags = fcntl(_udp_sock, F_GETFL, 0);
+        if (flags != -1) {
+            fcntl(_udp_sock, F_SETFL, flags | O_NONBLOCK);
+        }
+
+        // 2. 配置目标地址（建议将端口和IP定义为常量或变量）
+        _pj_addr.sin_family = AF_INET;
+        _pj_addr.sin_port = htons(9870); // PlotJuggler 默认端口
+
+        if (inet_pton(AF_INET, "127.0.0.1", &_pj_addr.sin_addr) <= 0) {
+            PX4_ERR("Invalid PlotJuggler IP address");
+        }
+
+        PX4_INFO("PlotJuggler telemetry initialized on 127.0.0.1:9870");
+
+        } else {
+            // 如果创建失败，记录错误但不至于让整个模块崩溃（只是没法看图表）
+            PX4_ERR("Failed to create PlotJuggler UDP socket: %d", errno);
+        }
 
 
     return true;
@@ -1017,11 +1040,14 @@ Key property of this version:
 void AuvHopf::publish_debug(float dt)
 {
     auv_hopf_status_s msg{};
+
+    // 在函数开头获取一次时间戳，整个函数内部统一使用，减少系统调用开销
     msg.timestamp = hrt_absolute_time();
 
     msg.sim_time = _sim_time;
     msg.dt = dt;
 
+    // 1. 核心状态数组赋值
     for (int i = 0; i < auv::NX; ++i) {
         msg.x[i]         = _x(i);
         msg.z[i]         = _z(i);
@@ -1029,15 +1055,15 @@ void AuvHopf::publish_debug(float dt)
         msg.error_x_z[i] = _x(i) - _z(i);
     }
 
+    // 2. 控制与扰动数组赋值
     for (int i = 0; i < auv::NU; ++i) {
-        // 这里先把 tau_nom 字段复用为第一层 central input，
-        // 便于后续区分第一层 / 第二层控制输出。
         msg.d_true[i]      = _d_true(i);
         msg.d_hat[i]       = _d_hat(i);
         msg.tau_nom[i]     = _v_central(i);
         msg.tau_applied[i] = _tau_applied(i);
     }
 
+    // 3. Hopf 内部状态
     const auto &hopf_dbg = _hopf.debug();
     msg.hopf_surge[0] = hopf_dbg.surge.d_raw;
     msg.hopf_surge[1] = hopf_dbg.surge.d_pred_before;
@@ -1051,78 +1077,71 @@ void AuvHopf::publish_debug(float dt)
     msg.hopf_yaw[1] = hopf_dbg.yaw.d_pred_before;
     msg.hopf_yaw[2] = hopf_dbg.yaw.f_error;
 
+    // 4. 执行器限幅状态
     const auto &sat_dbg = _actuator_sat.debug();
     for (int i = 0; i < 3; ++i) {
         msg.tau_fb[i]        = 0.0f;
         msg.tau_ancillary[i] = _tau_anc(i);
         msg.tau_raw[i]       = sat_dbg.tau_cmd(i);
+        msg.tau_clip[i]      = sat_dbg.tau_clip(i); // [新增] 记录被截断的控制量
     }
 
     msg.xref_nhor = static_cast<uint8_t>(_xref_nhor);
+
+    // ==========================================================
+    // 5. 标量指标合并赋值 (完全替代原来的 18 次 publish_scalar_debug)
+    // ==========================================================
+    msg.disturbance_residual_norm = _disturbance_residual_norm;
+    msg.preview_update_norm       = _preview_update_norm;
+    msg.preview_span_norm         = _preview_span_norm;
+    msg.tube_tracking_error_norm  = _tube_tracking_error_norm;
+    msg.tube_value_surrogate      = _tube_value_surrogate;
+    msg.tube_value_delta          = _tube_value_delta;
+
+    msg.central_state_violation   = _central_state_violation_norm;
+    msg.anc_state_violation       = _anc_state_violation_norm;
+    msg.central_input_violation   = _central_input_violation_norm;
+    msg.anc_input_violation       = _anc_input_violation_norm;
+
+    // 逻辑标志位
+    msg.hopf_preview_ok   = _hopf_preview_ok;
+    msg.central_export_ok = _central_export_ok;
+    msg.central_bridge_ok = _central_bridge_ok;
+    msg.anc_bridge_ok     = _anc_bridge_ok;
+
+    // 最终，整个模块每个循环只往 uORB 发送 1 次数据！
     _status_pub.publish(msg);
 
-    publish_scalar_debug("resid", _disturbance_residual_norm);
-    publish_scalar_debug("prvupd", _preview_update_norm);
-    publish_scalar_debug("prvspn", _preview_span_norm);
-    publish_scalar_debug("tubee", _tube_tracking_error_norm);
-    publish_scalar_debug("tubev", _tube_value_surrogate);
-    publish_scalar_debug("tubedv", _tube_value_delta);
-    publish_scalar_debug("zviol", _central_state_violation_norm);
-    publish_scalar_debug("xviol", _anc_state_violation_norm);
-    publish_scalar_debug("cvu", _central_input_violation_norm);
-    publish_scalar_debug("avu", _anc_input_violation_norm);
-    publish_scalar_debug("clipn", _physical_clip_norm);
-    publish_scalar_debug("hprev", _hopf_preview_ok ? 1.0f : 0.0f);
-    publish_scalar_debug("cexok", _central_export_ok ? 1.0f : 0.0f);
-    publish_scalar_debug("cbrdg", _central_bridge_ok ? 1.0f : 0.0f);
-    publish_scalar_debug("abrdg", _anc_bridge_ok ? 1.0f : 0.0f);
-    publish_scalar_debug("clipu", sat_dbg.tau_clip(0));
-    publish_scalar_debug("clipv", sat_dbg.tau_clip(1));
-    publish_scalar_debug("clipr", sat_dbg.tau_clip(2));
-
-    // 实时发送核心数据给 PlotJuggler
-// 实时发送核心数据给 PlotJuggler
+    // ==========================================================
+    // 6. 实时发送核心数据给 PlotJuggler (已优化性能)
+    // ==========================================================
     if (_udp_sock >= 0) {
-        char json_buf[1024]; // 稍微增大 buffer 防止字符串被截断
-        
-        // 利用 JSON 嵌套，把轨迹和三个通道的扰动分门别类
-        snprintf(json_buf, sizeof(json_buf),
-                 "{"
-                 "\"traj\":{\"x_actual\":%.3f, \"y_actual\":%.3f, \"x_nominal\":%.3f, \"y_nominal\":%.3f, \"x_ref\":%.3f, \"y_ref\":%.3f}, "
-                 "\"dist_surge\":{\"true\":%.3f, \"hat\":%.3f}, "
-                 "\"dist_sway\":{\"true\":%.3f, \"hat\":%.3f}, "
-                 "\"dist_yaw\":{\"true\":%.3f, \"hat\":%.3f}"
-                 "}",
-                 // 1. 轨迹跟踪数据 (实际 x, 名义 z, 目标 xref)
-                 (double)_x(0), (double)_x(1),
-                 (double)_z(0), (double)_z(1),
-                 (double)_xref(0), (double)_xref(1),
-                 
-                 // 2. 纵向 (Surge) 扰动力
-                 (double)_d_true(0), (double)_d_hat(0),
-                 
-                 // 3. 横向 (Sway) 扰动力
-                 (double)_d_true(1), (double)_d_hat(1),
-                 
-                 // 4. 艏向 (Yaw) 扰动力矩
-                 (double)_d_true(2), (double)_d_hat(2)
-                 );
-                 
-        sendto(_udp_sock, json_buf, strlen(json_buf), 0,
-               (struct sockaddr *)&_pj_addr, sizeof(_pj_addr));
+        char json_buf[1024];
+
+        // 捕获 snprintf 的返回值
+        int len = snprintf(json_buf, sizeof(json_buf),
+                "{"
+                "\"traj\":{\"x_actual\":%.3f, \"y_actual\":%.3f, \"x_nominal\":%.3f, \"y_nominal\":%.3f, \"x_ref\":%.3f, \"y_ref\":%.3f}, "
+                "\"dist_surge\":{\"true\":%.3f, \"hat\":%.3f}, "
+                "\"dist_sway\":{\"true\":%.3f, \"hat\":%.3f}, "
+                "\"dist_yaw\":{\"true\":%.3f, \"hat\":%.3f}"
+                "}",
+                (double)_x(0), (double)_x(1), (double)_z(0), (double)_z(1), (double)_xref(0), (double)_xref(1),
+                (double)_d_true(0), (double)_d_hat(0),
+                (double)_d_true(1), (double)_d_hat(1),
+                (double)_d_true(2), (double)_d_hat(2)
+                );
+
+        // 检查返回值：大于0且未发生截断
+        if (len > 0 && len < (int)sizeof(json_buf)) {
+            sendto(_udp_sock, json_buf, len, 0,
+                (struct sockaddr *)&_pj_addr, sizeof(_pj_addr));
+        } else {
+            PX4_WARN("JSON buffer truncated or error!");
+        }
     }
-
 }
 
-void AuvHopf::publish_scalar_debug(const char *key, float value)
-{
-    debug_key_value_s msg{};
-    msg.timestamp = hrt_absolute_time();
-    msg.value = value;
-    strncpy(msg.key, key, sizeof(msg.key) - 1);
-    msg.key[sizeof(msg.key) - 1] = '\0';
-    _debug_key_value_pub.publish(msg);
-}
 
 ModuleBase::Descriptor AuvHopf::desc{
     AuvHopf::task_spawn, AuvHopf::custom_command, AuvHopf::print_usage
