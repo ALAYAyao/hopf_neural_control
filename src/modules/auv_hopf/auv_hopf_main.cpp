@@ -28,38 +28,13 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <px4_platform_common/defines.h>
+#include "trajectory.hpp"
 /**
  * @file auv_hopf_main.cpp
  *
  * @brief AUV Hopf + Tube-MPC 主模块
  *
- * 当前版本定位：
- * 1. 先把学术代码主链在 PX4 模块内部完整跑通
- * 2. 使用内部状态 x / z 做闭环仿真
- * 3. 明确拆出第一层 central-path OCP 与第二层扰动增强预测层
- *
- * 主要数据流（当前两层过渡版）：
- *   mission_ref_hor = build_mission_reference_horizon(t)
- *   d_true          = wave_disturbance.step(x, t)
- *   d_hat           = hopf_observer.update(x, tau_prev, dt)
- *
- *   v_central       = central_mpc.solve(z, mission_ref_hor, d_zero)
- *   z_hor, v_hor    = central_mpc.export_last_solution_horizon(...)
- *
- *   tau_anc         = ancillary_mpc.solve(x, z_hor, v_hor, d_hat_hor)
- *   tau_applied     = actuator_saturation.apply(tau_anc)
- *
- *   x_next          = model.step(x, tau_applied, d_true, dt)
- *   z_next          = model.step(z, v_central, 0, dt)
- *
- * 注意：
- * - 手工圆轨迹不再直接扮演第一层 nominal trajectory；
- * - 它现在只是 mission reference，真正的第一层由 central_mpc 在线生成；
- * - 第二层现在优先使用第一层最近一次求解导出的整条 z* / v* 时域；
- * - Hopf 扰动预览不再使用 ZOH 平铺；它由当前已学得的振子内模状态在短预测域上做信号外推生成；
- * - 若 central 时域导出失败，才退回到近似前向滚动兜底；
- * - 执行层现在显式使用 actuator_saturation，thruster_allocation 不再承担控制器语义。
- * - 参数初始化改为通过 profile bundle 一次性装载，正式区分 paper_reproduction 与 engineering_default。
+ * 当前版本定位：*********
  */
 
 class AuvHopf :
@@ -114,6 +89,7 @@ private:
     struct sockaddr_in _pj_addr{};
 
     // mission-level 当前参考点（上层任务参考，不直接等于第一层）
+     // mission-level 当前参考点（来自离线参考轨迹表，不直接等于第一层）
     auv::StateVec _xref{};
 
     // 当前真实扰动 / 学习估计 / 控制量
@@ -131,12 +107,16 @@ private:
 
     // 第一层低频重规划调度
     static constexpr float kCentralReplanPeriod = 15.0f;
-    int  _central_replan_steps{1};        // 5s 对应多少个 ancillary tick
-    int  _central_ticks_since_replan{0};  // 距上次第一层重规划已过多少拍
-    bool _central_plan_valid{false};      // 当前缓存的 5s central 计划是否有效
+    int  _central_replan_steps{1};
+    int  _central_ticks_since_replan{0};
+    bool _central_plan_valid{false};
+
+    // 离线参考轨迹索引
+    int _ref_index{0};
 
     // 时域缓存
     float _mission_hor[auv::NX * auv::NHOR_MAX]{};
+    float _mission_u_hor[auv::NU * auv::NHOR_MAX]{};
     float _zref_hor[auv::NX * auv::NHOR_MAX]{};
     float _vref_hor[auv::NU * auv::NHOR_MAX]{};
     float _dhat_hor[auv::NP * auv::NHOR_MAX]{};
@@ -178,9 +158,10 @@ private:
     uORB::Publication<debug_key_value_s> _debug_key_value_pub{ORB_ID(debug_key_value)};
 
     // 内部帮助函数
+    // 内部帮助函数
     void reset_states();
-    void build_mission_reference(float t);
-    void build_mission_reference_horizon();
+    void build_mission_reference_from_table();
+    void build_mission_reference_horizon_from_table();
     void build_disturbance_preview_horizon();
     void build_zero_disturbance_horizon();
     void build_central_rollout_horizon();
@@ -189,11 +170,10 @@ private:
     void shift_central_plan_one_stage();
     void sync_nominal_from_plan_head();
 
-    static auv::StateVec mission_reference_at(float t,
-                                              const auv::MissionReferenceParams &params);
     static void zero_horizon_buffer(float *buf, int total_len);
     static void shift_horizon_left(float *buf, int nhor, int dim);
     static void hold_last_stage(float *buf, int nhor, int dim);
+
     static void configure_mpc(MpcOptim &mpc,
                               const auv::AuvPlantParams &plant,
                               const auv::MpcWeightParams &weights,
@@ -476,18 +456,32 @@ void AuvHopf::reset_states()
     _anc_bridge_ok = true;
 
     zero_horizon_buffer(_mission_hor, auv::NX * auv::NHOR_MAX);
+    zero_horizon_buffer(_mission_u_hor, auv::NU * auv::NHOR_MAX);
     zero_horizon_buffer(_zref_hor, auv::NX * auv::NHOR_MAX);
     zero_horizon_buffer(_vref_hor, auv::NU * auv::NHOR_MAX);
     zero_horizon_buffer(_dhat_hor, auv::NP * auv::NHOR_MAX);
     zero_horizon_buffer(_dhat_prev_hor, auv::NP * auv::NHOR_MAX);
     zero_horizon_buffer(_dzero_hor, auv::NP * auv::NHOR_MAX);
 
-    // 初始放到任务参考轨迹起点
-    _xref = mission_reference_at(0.0f, _mission_ref_params);
-    _z = _xref;
-    _x = _xref;
-    _x(0) += 2.0f;
-    _x(1) -= 1.0f;
+    _ref_index = _mission_ref_params.ref_start_index;
+    if (_ref_index < 0) {
+        _ref_index = 0;
+    }
+    if (_ref_index >= auv::TRAJ_LENGTH) {
+        _ref_index = auv::TRAJ_LENGTH - 1;
+    }
+
+    // 初始状态对齐到离线参考轨迹起点
+    _x(0) = auv::REF_TRAJECTORY[_ref_index][1];
+    _x(1) = auv::REF_TRAJECTORY[_ref_index][2];
+    _x(2) = auv::REF_TRAJECTORY[_ref_index][3];
+    _x(3) = auv::REF_TRAJECTORY[_ref_index][4];
+    _x(4) = auv::REF_TRAJECTORY[_ref_index][5];
+    _x(5) = auv::REF_TRAJECTORY[_ref_index][6];
+
+    _xref = _x;
+    _z = _x;
+
     _wave.reset();
     _hopf.reset();
 }
@@ -500,30 +494,47 @@ void AuvHopf::reset_states()
  *   Yref = R sin(wt)
  *   psiref = atan2(Ydot, Xdot)
  */
-void AuvHopf::build_mission_reference(float t)
+void AuvHopf::build_mission_reference_from_table()
 {
-    _xref = mission_reference_at(t, _mission_ref_params);
+    int idx = _ref_index;
+
+    if (idx < 0) {
+        idx = 0;
+    }
+
+    if (idx >= auv::TRAJ_LENGTH) {
+        idx = auv::TRAJ_LENGTH - 1;
+    }
+
+    _xref(0) = auv::REF_TRAJECTORY[idx][1];
+    _xref(1) = auv::REF_TRAJECTORY[idx][2];
+    _xref(2) = auv::REF_TRAJECTORY[idx][3];
+    _xref(3) = auv::REF_TRAJECTORY[idx][4];
+    _xref(4) = auv::REF_TRAJECTORY[idx][5];
+    _xref(5) = auv::REF_TRAJECTORY[idx][6];
 }
 
-/**
- * @brief 构造 mission reference horizon
- *
- * 当前手工圆轨迹只作为第一层 nominal OCP 的外部目标，
- * 不再直接被解释成论文里的 central path。
- */
-void AuvHopf::build_mission_reference_horizon()
+void AuvHopf::build_mission_reference_horizon_from_table()
 {
     _xref_nhor = (_central_mpc.horizon_length() > 0) ? _central_mpc.horizon_length() : 20;
-    const float dt = (_central_mpc.sample_time() > 0.0f) ? _central_mpc.sample_time() : 0.02f;
 
     zero_horizon_buffer(_mission_hor, auv::NX * auv::NHOR_MAX);
+    zero_horizon_buffer(_mission_u_hor, auv::NU * auv::NHOR_MAX);
 
     for (int k = 0; k < _xref_nhor && k < auv::NHOR_MAX; ++k) {
-        const float tk = _sim_time + static_cast<float>(k) * dt;
-        const auv::StateVec xref_k = mission_reference_at(tk, _mission_ref_params);
+        int idx = _ref_index + k;
 
+        if (idx >= auv::TRAJ_LENGTH) {
+            idx = auv::TRAJ_LENGTH - 1; // 尾部保持
+        }
+
+        // REF_TRAJECTORY[idx] = {t, X, Y, psi, u, v, r, tau_u, tau_v, tau_r}
         for (int i = 0; i < auv::NX; ++i) {
-            _mission_hor[k * auv::NX + i] = xref_k(i);
+            _mission_hor[k * auv::NX + i] = auv::REF_TRAJECTORY[idx][1 + i];
+        }
+
+        for (int i = 0; i < auv::NU; ++i) {
+            _mission_u_hor[k * auv::NU + i] = auv::REF_TRAJECTORY[idx][7 + i];
         }
     }
 
@@ -778,10 +789,14 @@ void AuvHopf::run()
         perf_begin(_perf_total_run);
         _sim_time += dt;
 
-        // 1) 始终更新当前 mission 点（调试/显示）
-        build_mission_reference(_sim_time);
+        // --------------------------------------------------
+        // 1) 当前参考点来自离线轨迹表，而不是解析圆
+        // --------------------------------------------------
+        build_mission_reference_from_table();
 
-        // 2) 始终更新真实扰动 / Hopf 学习 / preview
+        // --------------------------------------------------
+        // 2) 更新真实扰动 / Hopf 学习 / 预览
+        // --------------------------------------------------
         _d_true = _wave.step(_x, _sim_time);
         _d_hat  = _hopf.update(_x, _tau_prev, dt);
         _disturbance_residual_norm = input_norm(_d_true - _d_hat);
@@ -789,16 +804,17 @@ void AuvHopf::run()
         build_disturbance_preview_horizon();
         build_zero_disturbance_horizon();
 
-        // 3) 第一层只在“到点”时重规划
+        // --------------------------------------------------
+        // 3) 第一层：central MPC 跟踪离线参考轨迹表切出来的 horizon
+        // --------------------------------------------------
         if (need_central_replan()) {
 
-            build_mission_reference_horizon();
+            build_mission_reference_horizon_from_table();
 
-            // 关键：从实际位置 x 重规划，不再从旧 z 重规划
             _central_mpc.set_reference_horizon_control_preview(
                 _x,
                 _mission_hor,
-                nullptr,
+                _mission_u_hor,
                 _dzero_hor,
                 _xref_nhor);
 
@@ -810,16 +826,18 @@ void AuvHopf::run()
             _central_input_violation_norm =
                 input_bound_violation_norm(_v_central, _central_mpc.bounds_params());
 
-            build_central_rollout_horizon();   // 导出当前 5 s 计划到 _zref_hor/_vref_hor
+            build_central_rollout_horizon();   // 导出当前 nominal z*/v* 时域
 
-            // 当前名义点直接取缓存计划首点
+            // 当前名义点取最近一次 central 计划首点
             sync_nominal_from_plan_head();
 
             _central_plan_valid = true;
             _central_ticks_since_replan = 0;
         }
 
-        // 4) 第二层每拍都跟踪当前缓存计划
+        // --------------------------------------------------
+        // 4) 第二层：ancillary MPC 每拍跟踪 central path，并注入 Hopf 预览
+        // --------------------------------------------------
         _anc_mpc.set_reference_horizon_control_preview(
             _x,
             _zref_hor,
@@ -835,7 +853,9 @@ void AuvHopf::run()
         _anc_input_violation_norm =
             input_bound_violation_norm(_tau_anc, _anc_mpc.bounds_params());
 
-        // 5) 执行层
+        // --------------------------------------------------
+        // 5) 执行层物理限幅
+        // --------------------------------------------------
         _tau_applied = _actuator_sat.apply(_tau_anc);
         _physical_clip_norm = input_norm(_actuator_sat.debug().tau_clip);
 
@@ -849,44 +869,48 @@ void AuvHopf::run()
 
         if (!is_control_safe) {
             PX4_ERR("CRITICAL: MPC generated NaN/Inf! Fallback to zero force.");
-            _tau_applied.zero(); // 强制输出 0 推力保命
-
-            // 可以选择在这里调用 _central_mpc.reset() 来重启求解器
+            _tau_applied.zero();
         }
 
-        // 6) 推进真实状态
+        // --------------------------------------------------
+        // 6) 推进真实系统状态
+        // --------------------------------------------------
         _x = _model.step(_x, _tau_applied, _d_true, dt);
-
-        // 7) 消费掉 central 计划的一个 stage
-        shift_central_plan_one_stage();
-        ++_central_ticks_since_replan;
-
-        // 8) 记录与调试
         _tau_prev = _tau_applied;
+
+        // --------------------------------------------------
+        // 7) nominal / tracking / debug 指标
+        // --------------------------------------------------
         _tube_tracking_error_norm = tube_error_norm(_x, _z);
-        const float tube_value_prev = _tube_value_surrogate;
+        _tube_value_delta = quadratic_tracking_value(_x, _z, _anc_mpc.weight_params()) - _tube_value_surrogate;
         _tube_value_surrogate = quadratic_tracking_value(_x, _z, _anc_mpc.weight_params());
-        _tube_value_delta = _tube_value_surrogate - tube_value_prev;
+
         _central_state_violation_norm = state_bound_violation_norm(_z, _central_state_bounds);
         _anc_state_violation_norm = state_bound_violation_norm(_x, _anc_state_bounds);
 
-        // --------------------------------------------------
-        // 8) 发布调试信息
         publish_debug(dt);
+
+        // --------------------------------------------------
+        // 8) 参考索引推进
+        // --------------------------------------------------
+        _ref_index += _mission_ref_params.ref_stride;
+        if (_ref_index >= auv::TRAJ_LENGTH) {
+            _ref_index = auv::TRAJ_LENGTH - 1;  // 到尾部保持最后一点
+        }
+
+        // --------------------------------------------------
+        // 9) central 缓存计划推进计数
+        // --------------------------------------------------
+        ++_central_ticks_since_replan;
 
         perf_end(_perf_total_run);
 
-        hrt_abstime now = hrt_absolute_time();
-
-        if (_sim_time >= _experiment_cfg.sim_time_limit) {
-            PX4_INFO("时间到！已运行 %.1f 秒，算法自动安全退出。", (double)_experiment_cfg.sim_time_limit);
-            request_stop();
-        }
-
-        if (now < next_run_time) {
+        // 等待下一个采样拍
+        const hrt_abstime now = hrt_absolute_time();
+        if (next_run_time > now) {
             px4_usleep(next_run_time - now);
         } else {
-            PX4_WARN("Deadline Missed! dt overrun.");
+            // 落后时直接追赶，不 sleep
             next_run_time = now;
         }
     }

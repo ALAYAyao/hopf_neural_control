@@ -168,10 +168,6 @@ struct PhysicalActuatorLimits {
 /**
  * @brief 任务层参考轨迹参数
  */
-struct MissionReferenceParams {
-    float circle_radius;
-    float circle_omega;
-};
 
 /**
  * @brief 运行实验配置
@@ -435,11 +431,19 @@ inline PhysicalActuatorLimits default_physical_actuator_limits()
     return p;
 }
 
+struct MissionReferenceParams {
+    // 从离线参考轨迹表的哪个点开始
+    int ref_start_index;
+
+    // 每个控制拍推进几个参考点，通常为 1
+    int ref_stride;
+};
+
 inline MissionReferenceParams default_mission_reference_params()
 {
     MissionReferenceParams p{};
-    p.circle_radius = 30.0f;
-    p.circle_omega  = 0.02f;
+    p.ref_start_index = 0;
+    p.ref_stride = 1;
     return p;
 }
 
