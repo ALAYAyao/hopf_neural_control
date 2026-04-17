@@ -40,7 +40,7 @@ static constexpr int N_WAVE_FREQ = 4;
 static constexpr int N_WAVE_DIR  = 4;
 
 // MPC 预测域参考最大长度
-static constexpr int NHOR_MAX = 64;
+static constexpr int NHOR_MAX = 192;
 
 using StateVec = matrix::Vector<float, NX>;
 using InputVec = matrix::Vector<float, NU>;
@@ -609,11 +609,11 @@ inline MpcConfig default_central_mpc_config()
     MpcConfig cfg{};
 
     cfg.dt = 0.1f;
-    cfg.Thor = 5.0f;
-    cfg.Nhor = 51;
+    cfg.Thor = 15.0f;
+    cfg.Nhor = 151;
 
-    cfg.MaxGradIter = 2;
-    cfg.MaxMultIter = 1;
+    cfg.MaxGradIter = 10;
+    cfg.MaxMultIter = 3;
     cfg.shift_control = true;
     cfg.use_terminal_cost = true;
     cfg.use_integral_cost = true;
@@ -629,8 +629,8 @@ inline MpcConfig default_ancillary_mpc_config()
     cfg.dt = 0.1f;
     cfg.Thor = 1.0f;
     cfg.Nhor = 11;
-    cfg.MaxGradIter = 2;
-    cfg.MaxMultIter = 1;
+    cfg.MaxGradIter = 10;
+    cfg.MaxMultIter = 3;
     cfg.shift_control = true;
     cfg.use_terminal_cost = true;
     cfg.use_integral_cost = true;

@@ -130,7 +130,7 @@ private:
     float _sim_time{0.0f};
 
     // 第一层低频重规划调度
-    static constexpr float kCentralReplanPeriod = 5.0f;
+    static constexpr float kCentralReplanPeriod = 15.0f;
     int  _central_replan_steps{1};        // 5s 对应多少个 ancillary tick
     int  _central_ticks_since_replan{0};  // 距上次第一层重规划已过多少拍
     bool _central_plan_valid{false};      // 当前缓存的 5s central 计划是否有效
@@ -441,11 +441,6 @@ float AuvHopf::sanitize_dt(float dt)
 void AuvHopf::reset_states()
 {
     _x.zero();
-
-    _x(0) = _mission_ref_params.circle_radius - 2.0f;
-    _x(1) = 0.0f;
-    _x(2) = M_PI_F / 2.0f; // 车头朝正前方 (Y轴正向)
-
     _z.zero();
     _xref.zero();
 
@@ -480,7 +475,6 @@ void AuvHopf::reset_states()
     _central_bridge_ok = true;
     _anc_bridge_ok = true;
 
-
     zero_horizon_buffer(_mission_hor, auv::NX * auv::NHOR_MAX);
     zero_horizon_buffer(_zref_hor, auv::NX * auv::NHOR_MAX);
     zero_horizon_buffer(_vref_hor, auv::NU * auv::NHOR_MAX);
@@ -488,9 +482,12 @@ void AuvHopf::reset_states()
     zero_horizon_buffer(_dhat_prev_hor, auv::NP * auv::NHOR_MAX);
     zero_horizon_buffer(_dzero_hor, auv::NP * auv::NHOR_MAX);
 
-    // 初始名义状态
-    _z = _x;
-
+    // 初始放到任务参考轨迹起点
+    _xref = mission_reference_at(0.0f, _mission_ref_params);
+    _z = _xref;
+    _x = _xref;
+    _x(0) += 2.0f;
+    _x(1) -= 1.0f;
     _wave.reset();
     _hopf.reset();
 }
