@@ -107,14 +107,14 @@ void HopfObserver::step_bank_preview_autonomous(OscillatorBank &bank, float Ts, 
             bank.wi[i] = 0.1f;
         }
 
-        if (bank.wi[i] > 20.0f) {
-            bank.wi[i] = 20.0f;
+        if (bank.wi[i] > 5.0f) {
+            bank.wi[i] = 5.0f;
         }
 
-        if (bank.ai[i] > 200.0f) {
-            bank.ai[i] = 200.0f;
-        } else if (bank.ai[i] < -200.0f) {
-            bank.ai[i] = -200.0f;
+        if (bank.ai[i] > 10.0f) {
+            bank.ai[i] = 10.0f;
+        } else if (bank.ai[i] < -10.0f) {
+            bank.ai[i] = -10.0f;
         }
     }
 }

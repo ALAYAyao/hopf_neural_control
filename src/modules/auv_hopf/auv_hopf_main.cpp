@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include <math.h>
+#include <errno.h>
 
 #include "auv_common.hpp"
 #include "auv_model.hpp"
@@ -34,7 +35,7 @@
  *
  * @brief AUV Hopf + Tube-MPC 主模块
  *
- * 当前版本定位：*********
+ * 当前版本定位：离线参考轨迹 + central/ancillary 两层 Tube-MPC 过渡实现
  */
 
 class AuvHopf :
@@ -88,8 +89,7 @@ private:
     int _udp_sock{-1};
     struct sockaddr_in _pj_addr{};
 
-    // mission-level 当前参考点（上层任务参考，不直接等于第一层）
-     // mission-level 当前参考点（来自离线参考轨迹表，不直接等于第一层）
+    // mission-level 当前参考点（来自离线参考轨迹表，不直接等于第一层）
     auv::StateVec _xref{};
 
     // 当前真实扰动 / 学习估计 / 控制量
@@ -158,13 +158,13 @@ private:
     uORB::Publication<debug_key_value_s> _debug_key_value_pub{ORB_ID(debug_key_value)};
 
     // 内部帮助函数
-    // 内部帮助函数
     void reset_states();
     void build_mission_reference_from_table();
     void build_mission_reference_horizon_from_table();
     void build_disturbance_preview_horizon();
     void build_zero_disturbance_horizon();
     void build_central_rollout_horizon();
+    void build_central_rollout_horizon_receding();   // 新增
 
     bool need_central_replan() const;
     void shift_central_plan_one_stage();
@@ -320,30 +320,6 @@ float AuvHopf::quadratic_tracking_value(const auv::StateVec &x,
     return value;
 }
 
-auv::StateVec AuvHopf::mission_reference_at(float t,
-                                            const auv::MissionReferenceParams &params)
-{
-    const float R = params.circle_radius;
-    const float w = params.circle_omega;
-
-    const float xr = R * cosf(w * t);
-    const float yr = R * sinf(w * t);
-
-    const float xdot_r = -R * w * sinf(w * t);
-    const float ydot_r =  R * w * cosf(w * t);
-
-    auv::StateVec xref{};
-    xref.zero();
-    xref(0) = xr;
-    xref(1) = yr;
-    xref(2) = atan2f(ydot_r, xdot_r);
-    xref(3) = R * w;
-    xref(4) = 0.0f;
-    xref(5) = w;
-
-    return xref;
-}
-
 void AuvHopf::zero_horizon_buffer(float *buf, int total_len)
 {
     if (buf == nullptr || total_len <= 0) {
@@ -487,12 +463,7 @@ void AuvHopf::reset_states()
 }
 
 /**
- * @brief 构造当前 mission reference 点
- *
- * 这里仍以平面圆轨迹为例，但它现在只承担“任务参考”角色：
- *   Xref = R cos(wt)
- *   Yref = R sin(wt)
- *   psiref = atan2(Ydot, Xdot)
+ * @brief 从离线参考轨迹表读取当前 mission reference 点
  */
 void AuvHopf::build_mission_reference_from_table()
 {
@@ -673,6 +644,79 @@ void AuvHopf::build_central_rollout_horizon()
     clamp_state_horizon_to_bounds(_zref_hor, nh, _central_state_bounds);
 }
 
+void AuvHopf::build_central_rollout_horizon_receding()
+{
+    const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
+    const float dt_nom =
+        (_central_mpc.sample_time() > 0.0f) ? _central_mpc.sample_time() : 0.02f;
+
+    zero_horizon_buffer(_zref_hor, auv::NX * auv::NHOR_MAX);
+    zero_horizon_buffer(_vref_hor, auv::NU * auv::NHOR_MAX);
+
+    // 复制一份“滚动中的 mission 参考时域”
+    float mission_x_roll[auv::NX * auv::NHOR_MAX]{};
+    float mission_u_roll[auv::NU * auv::NHOR_MAX]{};
+
+    for (int k = 0; k < nh; ++k) {
+        for (int i = 0; i < auv::NX; ++i) {
+            mission_x_roll[k * auv::NX + i] = _mission_hor[k * auv::NX + i];
+        }
+
+        for (int i = 0; i < auv::NU; ++i) {
+            mission_u_roll[k * auv::NU + i] = _mission_u_hor[k * auv::NU + i];
+        }
+    }
+
+    // 第一层从当前 nominal state 出发，而不是从 actual state 出发
+    auv::StateVec z_roll = _z;
+    auv::InputVec d_zero{};
+    d_zero.zero();
+
+    for (int k = 0; k < nh; ++k) {
+
+        // 记录当前 nominal state
+        for (int i = 0; i < auv::NX; ++i) {
+            _zref_hor[k * auv::NX + i] = z_roll(i);
+        }
+
+        // 用与第一层完全一致的参数，在当前滚动位置再 solve 一次
+        _central_mpc.set_reference_horizon_control_preview(
+            z_roll,
+            mission_x_roll,
+            mission_u_roll,
+            _dzero_hor,
+            nh);
+
+        const auv::InputVec vk = _central_mpc.solve();
+
+        for (int i = 0; i < auv::NU; ++i) {
+            _vref_hor[k * auv::NU + i] = vk(i);
+        }
+
+        // 最后一个 stage 不再继续前滚
+        if (k == nh - 1) {
+            break;
+        }
+
+        // 用第一层无扰 nominal model 推进一步
+        z_roll = _model.step(z_roll, vk, d_zero, dt_nom);
+
+        // 参考时域左移一格，形成 receding horizon
+        shift_horizon_left(mission_x_roll, nh, auv::NX);
+        shift_horizon_left(mission_u_roll, nh, auv::NU);
+
+        hold_last_stage(mission_x_roll, nh, auv::NX);
+        hold_last_stage(mission_u_roll, nh, auv::NU);
+    }
+
+    clamp_state_horizon_to_bounds(_zref_hor, nh, _central_state_bounds);
+
+    // 当前 nominal 点/控制取规划首点
+    sync_nominal_from_plan_head();
+
+    _central_export_ok = true;
+}
+
 bool AuvHopf::need_central_replan() const
 {
     return (!_central_plan_valid) || (_central_ticks_since_replan >= _central_replan_steps);
@@ -789,6 +833,12 @@ void AuvHopf::run()
         perf_begin(_perf_total_run);
         _sim_time += dt;
 
+        if (_sim_time >= _experiment_cfg.sim_time_limit) {
+            PX4_INFO("sim time limit reached: %.2f s", (double)_experiment_cfg.sim_time_limit);
+            perf_end(_perf_total_run);
+            break;
+        }
+
         // --------------------------------------------------
         // 1) 当前参考点来自离线轨迹表，而不是解析圆
         // --------------------------------------------------
@@ -811,31 +861,22 @@ void AuvHopf::run()
 
             build_mission_reference_horizon_from_table();
 
-            _central_mpc.set_reference_horizon_control_preview(
-                _x,
-                _mission_hor,
-                _mission_u_hor,
-                _dzero_hor,
-                _xref_nhor);
-
             perf_begin(_perf_central_solve);
-            _v_central = _central_mpc.solve();
+            build_central_rollout_horizon_receding();
             perf_end(_perf_central_solve);
 
             _central_bridge_ok = _central_mpc.debug().bridge_owner_match;
             _central_input_violation_norm =
                 input_bound_violation_norm(_v_central, _central_mpc.bounds_params());
 
-            build_central_rollout_horizon();   // 导出当前 nominal z*/v* 时域
-
-            // 当前名义点取最近一次 central 计划首点
-            sync_nominal_from_plan_head();
-
             _central_plan_valid = true;
             _central_ticks_since_replan = 0;
-        }
 
-        // --------------------------------------------------
+        } else if (_central_plan_valid) {
+            // 在两次 15 s 规划事件之间，继续消费缓存的 nominal 计划
+            shift_central_plan_one_stage();
+        }
+                    // --------------------------------------------------
         // 4) 第二层：ancillary MPC 每拍跟踪 central path，并注入 Hopf 预览
         // --------------------------------------------------
         _anc_mpc.set_reference_horizon_control_preview(
@@ -980,14 +1021,15 @@ int AuvHopf::print_status()
              _central_mpc.debug().rodas_stub_touch_count,
              _anc_mpc.debug().rodas_stub_touch_count);
 
+    const int nh_dbg = (_xref_nhor > 0) ? _xref_nhor : 1;
     PX4_INFO("xref_nhor = %d", _xref_nhor);
     PX4_INFO("preview0 = [%.3f %.3f %.3f], previewN = [%.3f %.3f %.3f]",
              (double)_dhat_hor[0],
              (double)_dhat_hor[1],
              (double)_dhat_hor[2],
-             (double)_dhat_hor[(_xref_nhor - 1) * auv::NP + 0],
-             (double)_dhat_hor[(_xref_nhor - 1) * auv::NP + 1],
-             (double)_dhat_hor[(_xref_nhor - 1) * auv::NP + 2]);
+             (double)_dhat_hor[(nh_dbg - 1) * auv::NP + 0],
+             (double)_dhat_hor[(nh_dbg - 1) * auv::NP + 1],
+             (double)_dhat_hor[(nh_dbg - 1) * auv::NP + 2]);
 
     PX4_INFO("zref0 = [%.3f %.3f %.3f %.3f %.3f %.3f]",
              (double)_zref_hor[0], (double)_zref_hor[1], (double)_zref_hor[2],
@@ -1062,7 +1104,7 @@ Key property of this version:
 - ancillary layer explicitly tracks z* / v* and uses disturbance preview
 - Hopf preview is generated by autonomous oscillator rollout instead of ZOH replication
 - actuator_saturation is now the dedicated physical layer object
-- runtime parameters are loaded through a named profile bundle: engineering_default or paper_reproduction
+- runtime parameters are loaded through a named profile bundle: engineering_default
 - debug stream now exposes residual / preview-update / preview-span / tube-value / bound-violation metrics for formal validation
 )DESCR_STR");
 

@@ -166,10 +166,6 @@ struct PhysicalActuatorLimits {
 };
 
 /**
- * @brief 任务层参考轨迹参数
- */
-
-/**
  * @brief 运行实验配置
  */
 struct ExperimentConfig {
@@ -260,6 +256,14 @@ struct MpcConfig {
     bool use_integral_cost;
 };
 
+struct MissionReferenceParams {
+    // 从离线参考轨迹表的哪个点开始
+    int ref_start_index;
+
+    // 每个控制拍推进几个参考点，通常为 1
+    int ref_stride;
+};
+
 struct RuntimeProfileBundle {
     const char *profile_name;
 
@@ -282,7 +286,6 @@ struct RuntimeProfileBundle {
     MpcStateBoundsParams ancillary_state_bounds;
     MpcConfig ancillary_config;
 };
-
 
 // ==================================================
 // 默认工厂函数
@@ -431,13 +434,6 @@ inline PhysicalActuatorLimits default_physical_actuator_limits()
     return p;
 }
 
-struct MissionReferenceParams {
-    // 从离线参考轨迹表的哪个点开始
-    int ref_start_index;
-
-    // 每个控制拍推进几个参考点，通常为 1
-    int ref_stride;
-};
 
 inline MissionReferenceParams default_mission_reference_params()
 {
@@ -613,8 +609,8 @@ inline MpcConfig default_central_mpc_config()
     MpcConfig cfg{};
 
     cfg.dt = 0.1f;
-    cfg.Thor = 15.0f;
-    cfg.Nhor = 151;
+    cfg.Thor = 1.0f;
+    cfg.Nhor = 11;
 
     cfg.MaxGradIter = 10;
     cfg.MaxMultIter = 3;
