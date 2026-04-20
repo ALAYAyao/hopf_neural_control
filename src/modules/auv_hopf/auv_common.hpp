@@ -40,7 +40,7 @@ static constexpr int N_WAVE_FREQ = 4;
 static constexpr int N_WAVE_DIR  = 4;
 
 // MPC 预测域参考最大长度
-static constexpr int NHOR_MAX = 192;
+static constexpr int NHOR_MAX = 64;
 
 using StateVec = matrix::Vector<float, NX>;
 using InputVec = matrix::Vector<float, NU>;

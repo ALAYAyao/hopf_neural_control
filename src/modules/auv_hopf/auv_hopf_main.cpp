@@ -35,7 +35,7 @@
  *
  * @brief AUV Hopf + Tube-MPC 主模块
  *
- * 当前版本定位：离线参考轨迹 + central/ancillary 两层 Tube-MPC 过渡实现
+ * 当前版本定位：离线参考轨迹 + central/ancillary 两层 Tube-MPC 实现
  */
 
 class AuvHopf :
@@ -102,14 +102,7 @@ private:
     auv::InputVec _zero_input{};
 
     // 调度时间
-    hrt_abstime _last_run{0};
     float _sim_time{0.0f};
-
-    // 第一层低频重规划调度
-    static constexpr float kCentralReplanPeriod = 15.0f;
-    int  _central_replan_steps{1};
-    int  _central_ticks_since_replan{0};
-    bool _central_plan_valid{false};
 
     // 离线参考轨迹索引
     int _ref_index{0};
@@ -164,10 +157,6 @@ private:
     void build_disturbance_preview_horizon();
     void build_zero_disturbance_horizon();
     void build_central_rollout_horizon();
-    void build_central_rollout_horizon_receding();   // 新增
-
-    bool need_central_replan() const;
-    void shift_central_plan_one_stage();
     void sync_nominal_from_plan_head();
 
     static void zero_horizon_buffer(float *buf, int total_len);
@@ -409,11 +398,8 @@ void AuvHopf::reset_states()
     _zero_input.zero();
 
     _sim_time = 0.0f;
-    _last_run = 0;
     _xref_nhor = 0;
 
-    _central_ticks_since_replan = 0;
-    _central_plan_valid = false;
 
     _disturbance_residual_norm = 0.0f;
     _preview_update_norm = 0.0f;
@@ -514,8 +500,10 @@ void AuvHopf::build_mission_reference_horizon_from_table()
 
 void AuvHopf::build_disturbance_preview_horizon()
 {
-    const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
-    const float dt_preview = (_anc_mpc.sample_time() > 0.0f) ? _anc_mpc.sample_time() : sanitize_dt(_central_mpc.sample_time());
+    const int nh = (_anc_mpc.horizon_length() > 1) ? _anc_mpc.horizon_length() : 2;
+    const float dt_preview = (_anc_mpc.sample_time() > 0.0f)
+        ? _anc_mpc.sample_time()
+        : sanitize_dt(_central_mpc.sample_time());
 
     for (int k = 0; k < auv::NHOR_MAX; ++k) {
         for (int i = 0; i < auv::NP; ++i) {
@@ -644,97 +632,6 @@ void AuvHopf::build_central_rollout_horizon()
     clamp_state_horizon_to_bounds(_zref_hor, nh, _central_state_bounds);
 }
 
-void AuvHopf::build_central_rollout_horizon_receding()
-{
-    const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
-    const float dt_nom =
-        (_central_mpc.sample_time() > 0.0f) ? _central_mpc.sample_time() : 0.02f;
-
-    zero_horizon_buffer(_zref_hor, auv::NX * auv::NHOR_MAX);
-    zero_horizon_buffer(_vref_hor, auv::NU * auv::NHOR_MAX);
-
-    // 复制一份“滚动中的 mission 参考时域”
-    float mission_x_roll[auv::NX * auv::NHOR_MAX]{};
-    float mission_u_roll[auv::NU * auv::NHOR_MAX]{};
-
-    for (int k = 0; k < nh; ++k) {
-        for (int i = 0; i < auv::NX; ++i) {
-            mission_x_roll[k * auv::NX + i] = _mission_hor[k * auv::NX + i];
-        }
-
-        for (int i = 0; i < auv::NU; ++i) {
-            mission_u_roll[k * auv::NU + i] = _mission_u_hor[k * auv::NU + i];
-        }
-    }
-
-    // 第一层从当前 nominal state 出发，而不是从 actual state 出发
-    auv::StateVec z_roll = _z;
-    auv::InputVec d_zero{};
-    d_zero.zero();
-
-    for (int k = 0; k < nh; ++k) {
-
-        // 记录当前 nominal state
-        for (int i = 0; i < auv::NX; ++i) {
-            _zref_hor[k * auv::NX + i] = z_roll(i);
-        }
-
-        // 用与第一层完全一致的参数，在当前滚动位置再 solve 一次
-        _central_mpc.set_reference_horizon_control_preview(
-            z_roll,
-            mission_x_roll,
-            mission_u_roll,
-            _dzero_hor,
-            nh);
-
-        const auv::InputVec vk = _central_mpc.solve();
-
-        for (int i = 0; i < auv::NU; ++i) {
-            _vref_hor[k * auv::NU + i] = vk(i);
-        }
-
-        // 最后一个 stage 不再继续前滚
-        if (k == nh - 1) {
-            break;
-        }
-
-        // 用第一层无扰 nominal model 推进一步
-        z_roll = _model.step(z_roll, vk, d_zero, dt_nom);
-
-        // 参考时域左移一格，形成 receding horizon
-        shift_horizon_left(mission_x_roll, nh, auv::NX);
-        shift_horizon_left(mission_u_roll, nh, auv::NU);
-
-        hold_last_stage(mission_x_roll, nh, auv::NX);
-        hold_last_stage(mission_u_roll, nh, auv::NU);
-    }
-
-    clamp_state_horizon_to_bounds(_zref_hor, nh, _central_state_bounds);
-
-    // 当前 nominal 点/控制取规划首点
-    sync_nominal_from_plan_head();
-
-    _central_export_ok = true;
-}
-
-bool AuvHopf::need_central_replan() const
-{
-    return (!_central_plan_valid) || (_central_ticks_since_replan >= _central_replan_steps);
-}
-
-void AuvHopf::shift_central_plan_one_stage()
-{
-    const int nh = (_xref_nhor > 1) ? _xref_nhor : 2;
-
-    shift_horizon_left(_zref_hor, nh, auv::NX);
-    shift_horizon_left(_vref_hor, nh, auv::NU);
-
-    hold_last_stage(_zref_hor, nh, auv::NX);
-    hold_last_stage(_vref_hor, nh, auv::NU);
-
-    sync_nominal_from_plan_head();
-}
-
 bool AuvHopf::init()
 {
     const auto bundle = auv::make_runtime_profile_bundle(kParameterProfile);
@@ -773,12 +670,6 @@ bool AuvHopf::init()
 
     reset_states();
 
-    _central_replan_steps =
-        static_cast<int>(kCentralReplanPeriod / sanitize_dt(_anc_mpc.sample_time()) + 0.5f);
-
-    if (_central_replan_steps < 1) {
-        _central_replan_steps = 1;
-    }
 
     _telem.init();
 
@@ -839,14 +730,11 @@ void AuvHopf::run()
             break;
         }
 
-        // --------------------------------------------------
-        // 1) 当前参考点来自离线轨迹表，而不是解析圆
-        // --------------------------------------------------
+        // 1) 当前 mission 参考点与第一层参考时域
         build_mission_reference_from_table();
+        build_mission_reference_horizon_from_table();
 
-        // --------------------------------------------------
-        // 2) 更新真实扰动 / Hopf 学习 / 预览
-        // --------------------------------------------------
+        // 2) 真实扰动 / Hopf 学习 / 预览
         _d_true = _wave.step(_x, _sim_time);
         _d_hat  = _hopf.update(_x, _tau_prev, dt);
         _disturbance_residual_norm = input_norm(_d_true - _d_hat);
@@ -854,37 +742,36 @@ void AuvHopf::run()
         build_disturbance_preview_horizon();
         build_zero_disturbance_horizon();
 
-        // --------------------------------------------------
-        // 3) 第一层：central MPC 跟踪离线参考轨迹表切出来的 horizon
-        // --------------------------------------------------
-        if (need_central_replan()) {
+        // 3) 第一层：从当前 nominal state 出发，每拍求解 central MPC
+        _central_mpc.set_reference_horizon_control_preview(
+            _z,
+            _mission_hor,
+            _mission_u_hor,
+            _dzero_hor,
+            _xref_nhor);
 
-            build_mission_reference_horizon_from_table();
+        perf_begin(_perf_central_solve);
+        _v_central = _central_mpc.solve();
+        perf_end(_perf_central_solve);
 
-            perf_begin(_perf_central_solve);
-            build_central_rollout_horizon_receding();
-            perf_end(_perf_central_solve);
+        _central_bridge_ok = _central_mpc.debug().bridge_owner_match;
+        _central_input_violation_norm =
+            input_bound_violation_norm(_v_central, _central_mpc.bounds_params());
 
-            _central_bridge_ok = _central_mpc.debug().bridge_owner_match;
-            _central_input_violation_norm =
-                input_bound_violation_norm(_v_central, _central_mpc.bounds_params());
+        build_central_rollout_horizon();
+        sync_nominal_from_plan_head();
 
-            _central_plan_valid = true;
-            _central_ticks_since_replan = 0;
+        // 4) 第二层：每拍跟踪 central path，并注入 Hopf 预览
+        const int nh_ref = (_anc_mpc.horizon_length() < _xref_nhor)
+                        ? _anc_mpc.horizon_length()
+                        : _xref_nhor;
 
-        } else if (_central_plan_valid) {
-            // 在两次 15 s 规划事件之间，继续消费缓存的 nominal 计划
-            shift_central_plan_one_stage();
-        }
-                    // --------------------------------------------------
-        // 4) 第二层：ancillary MPC 每拍跟踪 central path，并注入 Hopf 预览
-        // --------------------------------------------------
         _anc_mpc.set_reference_horizon_control_preview(
             _x,
             _zref_hor,
             _vref_hor,
             _dhat_hor,
-            _xref_nhor);
+            nh_ref);
 
         perf_begin(_perf_anc_solve);
         _tau_anc = _anc_mpc.solve();
@@ -894,56 +781,31 @@ void AuvHopf::run()
         _anc_input_violation_norm =
             input_bound_violation_norm(_tau_anc, _anc_mpc.bounds_params());
 
-        // --------------------------------------------------
-        // 5) 执行层物理限幅
-        // --------------------------------------------------
+        // 5) 执行层限幅
         _tau_applied = _actuator_sat.apply(_tau_anc);
         _physical_clip_norm = input_norm(_actuator_sat.debug().tau_clip);
 
-        bool is_control_safe = true;
-        for (int i = 0; i < 3; i++) {
-            if (!PX4_ISFINITE(_tau_applied(i))) {
-                is_control_safe = false;
-                break;
-            }
-        }
-
-        if (!is_control_safe) {
-            PX4_ERR("CRITICAL: MPC generated NaN/Inf! Fallback to zero force.");
-            _tau_applied.zero();
-        }
-
-        // --------------------------------------------------
-        // 6) 推进真实系统状态
-        // --------------------------------------------------
+        // 6) 推进真实系统
         _x = _model.step(_x, _tau_applied, _d_true, dt);
         _tau_prev = _tau_applied;
 
-        // --------------------------------------------------
-        // 7) nominal / tracking / debug 指标
-        // --------------------------------------------------
+        // 7) 指标
         _tube_tracking_error_norm = tube_error_norm(_x, _z);
-        _tube_value_delta = quadratic_tracking_value(_x, _z, _anc_mpc.weight_params()) - _tube_value_surrogate;
-        _tube_value_surrogate = quadratic_tracking_value(_x, _z, _anc_mpc.weight_params());
+        _tube_value_delta =
+            quadratic_tracking_value(_x, _z, _anc_mpc.weight_params()) - _tube_value_surrogate;
+        _tube_value_surrogate =
+            quadratic_tracking_value(_x, _z, _anc_mpc.weight_params());
 
         _central_state_violation_norm = state_bound_violation_norm(_z, _central_state_bounds);
         _anc_state_violation_norm = state_bound_violation_norm(_x, _anc_state_bounds);
 
         publish_debug(dt);
 
-        // --------------------------------------------------
         // 8) 参考索引推进
-        // --------------------------------------------------
         _ref_index += _mission_ref_params.ref_stride;
         if (_ref_index >= auv::TRAJ_LENGTH) {
-            _ref_index = auv::TRAJ_LENGTH - 1;  // 到尾部保持最后一点
+            _ref_index = auv::TRAJ_LENGTH - 1;
         }
-
-        // --------------------------------------------------
-        // 9) central 缓存计划推进计数
-        // --------------------------------------------------
-        ++_central_ticks_since_replan;
-
         perf_end(_perf_total_run);
 
         // 等待下一个采样拍
@@ -1095,7 +957,7 @@ int AuvHopf::print_usage(const char *reason)
 ### Description
 AUV Hopf + Tube-MPC composite control module.
 
-Current version runs a two-layer transitional architecture internally:
+Current version runs a cleaned two-layer architecture internally:
 wave disturbance -> Hopf learner -> central-path MPC -> Hopf-augmented ancillary MPC -> physical saturation -> plant update
 
 Key property of this version:
