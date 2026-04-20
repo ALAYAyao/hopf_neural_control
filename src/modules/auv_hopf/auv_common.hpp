@@ -314,9 +314,9 @@ inline HopfConfig default_hopf_config()
 
     cfg.surge.gamma = 1.0f;
     cfg.surge.mu = 1.0f;
-    cfg.surge.epsF = 0.7f;
+    cfg.surge.epsF = 1.0f;
     cfg.surge.epsW = 0.5f;
-    cfg.surge.eta = 1.0f;
+    cfg.surge.eta = 2.2f;
     cfg.surge.lambda_alpha = 0.0f;
 
     cfg.sway.gamma = 1.0f;
@@ -446,7 +446,7 @@ inline MissionReferenceParams default_mission_reference_params()
 inline ExperimentConfig default_experiment_config()
 {
     ExperimentConfig cfg{};
-    cfg.sim_time_limit = 100.0f;
+    cfg.sim_time_limit = 150.0f;
     return cfg;
 }
 
