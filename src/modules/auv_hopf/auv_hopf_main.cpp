@@ -361,15 +361,16 @@ void AuvHopf::configure_mpc(MpcOptim &mpc,
 
 void AuvHopf::sync_nominal_from_plan_head()
 {
+    const int ksync = (_xref_nhor > 1) ? 1 : 0;
+
     for (int i = 0; i < auv::NX; ++i) {
-        _z(i) = _zref_hor[i];
+        _z(i) = _zref_hor[ksync * auv::NX + i];
     }
 
     for (int i = 0; i < auv::NU; ++i) {
-        _v_central(i) = _vref_hor[i];
+        _v_central(i) = _vref_hor[ksync * auv::NU + i];
     }
 }
-
 float AuvHopf::sanitize_dt(float dt)
 {
     if (!PX4_ISFINITE(dt) || dt <= 0.0f) {

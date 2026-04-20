@@ -446,7 +446,7 @@ inline MissionReferenceParams default_mission_reference_params()
 inline ExperimentConfig default_experiment_config()
 {
     ExperimentConfig cfg{};
-    cfg.sim_time_limit = 300.0f;
+    cfg.sim_time_limit = 100.0f;
     return cfg;
 }
 
@@ -454,7 +454,7 @@ inline MpcWeightParams default_central_mpc_weight_params()
 {
     MpcWeightParams w{};
 
-    const float q[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
+    const float q[NX] = {8000.0f, 8000.0f, 5000.0f, 0.2f, 0.2f, 0.2f};
     // 增加推力惩罚，阻止满舵飙车
     const float r[NU] = {2.0f, 2.0f, 5.0f};
     const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
