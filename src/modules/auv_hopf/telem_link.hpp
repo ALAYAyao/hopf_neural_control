@@ -20,10 +20,12 @@ public:
     void send_string(const char *str);
 
     // --- 2. 新增一个提取数据的接口 ---
-    // 如果有新数据，返回 true 并把数据拷贝给你，然后清空更新标志
-    bool get_latest_data(TelemData &out_data);
+    float get_latest_rpm() const { return _rpm; } // 提供给外部调用的接口
+    uint64_t get_last_rx_timestamp() const { return _last_rx_time; }
 
 private:
+    float _rpm{0.0f};
+    uint64_t _last_rx_time{0};
     const char *_device_path;
     int _fd{-1};
 

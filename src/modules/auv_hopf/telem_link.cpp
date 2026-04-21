@@ -67,14 +67,9 @@ bool TelemLink::init()
     return true;
 }
 
-void TelemLink::send_string(const char *str)
-{
+void TelemLink::send_string(const char *str) {
     if (_fd >= 0 && str != nullptr) {
-        ssize_t bytes_written = ::write(_fd, str, strlen(str));
-        if (bytes_written < 0) {
-            // 如果串口断开了或者写入失败，什么都不做，直接静默忽略
-            // （满足了编译器“检查返回值”的强迫症）
-        }
+        ::write(_fd, str, strlen(str));
     }
 }
 
@@ -113,36 +108,12 @@ void TelemLink::update()
 }
 
 // ... 前面的 init 和 update 代码保持不变 ...
+void TelemLink::handle_uart_line(const char *line) {
+    if (line == nullptr) return;
 
-void TelemLink::handle_uart_line(const char *line)
-{
-    if (line == nullptr || line[0] == '\0') {
-        return;
+    float rpm_val = 0.0f;
+    if (sscanf(line, "RPM:%f", &rpm_val) == 1) {
+        _rpm = rpm_val;
+        _last_rx_time = hrt_absolute_time(); // 记录当前收到的微秒级时间戳
     }
-
-    // 解析你真正需要的数据
-    float rpm = 0.0f;
-    if (sscanf(line, "RPM:%f", &rpm) == 1) {
-
-        // 提取成功！存入内部结构体并打上“已更新”标签
-        _latest_data.rpm = rpm;
-        _latest_data.updated = true;
-
-        // 回复 ACK
-        char tx_buf[64];
-        snprintf(tx_buf, sizeof(tx_buf), "ACK:RPM:%.2f\r\n", (double)rpm);
-        send_string(tx_buf);
-    }
-    // ... 可以继续增加其他格式的 sscanf 解析 ...
-}
-
-// 新增提取接口的实现
-bool TelemLink::get_latest_data(TelemData &out_data)
-{
-    if (_latest_data.updated) {
-        out_data = _latest_data;    // 拷贝给外部
-        _latest_data.updated = false; // 阅后即焚（清除标志位）
-        return true;
-    }
-    return false;
 }

@@ -38,7 +38,6 @@
  
  实物实验版本
  */
-int flg;
 class AuvHopf :
     public ModuleBase,
     public ModuleParams
@@ -808,6 +807,25 @@ void AuvHopf::run()
             _ref_index = auv::TRAJ_LENGTH - 1;
         }
         perf_end(_perf_total_run);
+
+        _telem.update();
+        float current_rpm = _telem.get_latest_rpm();
+
+        // --- 安全检查：判断数据是否过期 ---
+        uint64_t now = hrt_absolute_time();
+        // 如果超过 500000 微秒（0.5秒）没收到新数据，认为通信断开
+        if (now - _telem.get_last_rx_timestamp() > 500000) {
+            PX4_WARN("MCU Telementry timeout! RPM data is stale.");
+            // 这里可以触发 AUV 的安全保护模式，比如让电机停转，或者切换到纯位置估算模式
+            current_rpm = 0.0f; 
+        }
+         PX4_INFO("velocity: %.2f m/s", (double)current_rpm);
+
+        char tx_buf[16];
+        //snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", (double)_tau_applied(0));
+        double stt = _tau_applied(0);
+        snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", stt);
+        _telem.send_string(tx_buf);
 
         // 等待下一个采样拍
         const hrt_abstime now = hrt_absolute_time();
