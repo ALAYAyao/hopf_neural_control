@@ -87,6 +87,8 @@ public:
     const WaveForceOutput &last_force_output() const { return _last_force; }
 
 private:
+    float _last_time{0.0f};
+    float _wave_phase[auv::N_WAVE_FREQ][auv::N_WAVE_DIR]{};
     auv::WaveEnvParams _wave_env{};
     auv::WaveForceModelParams _model_params{};
 
@@ -108,7 +110,7 @@ private:
                                   float d,
                                   float beta_last,
                                   float beta,
-                                  float t) const;
+                                  float dt);
 
     /**
      * @brief 角度归一化到 [-pi, pi]

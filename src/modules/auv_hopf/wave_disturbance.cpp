@@ -24,8 +24,13 @@ void WaveDisturbance::reset()
     _x_prev_internal.zero();
     _initialized = false;
     _last_force = {};
+    _last_time = 0.0f;
+    for (int n = 0; n < auv::N_WAVE_FREQ; n++) {
+        for (int m = 0; m < auv::N_WAVE_DIR; m++) {
+            _wave_phase[n][m] = 0.0f;
+        }
+    }
 }
-
 void WaveDisturbance::set_wave_env(const auv::WaveEnvParams &wave_env)
 {
     _wave_env = wave_env;
@@ -64,6 +69,14 @@ float WaveDisturbance::trapz(const float *x, const float *y, int n)
 
 WaveDisturbance::InputVec WaveDisturbance::step(const StateVec &x, float t)
 {
+    float dt = t - _last_time;
+    if (!_initialized) {
+        _x_prev_internal = x;
+        _initialized = true;
+        dt = 0.0f; // 第一步没有时间差
+    }
+    _last_time = t;
+
     // 仿真第一步：上一时刻状态初始化为当前状态
     if (!_initialized) {
         _x_prev_internal = x;
@@ -96,12 +109,12 @@ WaveDisturbance::InputVec WaveDisturbance::step(const StateVec &x, float t)
                                 _wave_env.d,
                                 beta_prev,
                                 beta_curr,
-                                t);
+                                dt);
 
     InputVec d_true{};
     d_true(0) = _model_params.scale_factor * _last_force.X;
     d_true(1) = _model_params.scale_factor * _last_force.Y;
-    d_true(2) = _model_params.scale_factor * _last_force.N;
+    d_true(2) = _model_params.scale_factor * 100 * _last_force.N;
 
     // 更新内部记忆，供下一步使用
     _x_prev_internal = x;
@@ -120,7 +133,7 @@ WaveDisturbance::WaveForceOutput WaveDisturbance::waveforce_sim(
     float d,
     float beta_last,
     float beta,
-    float t) const
+    float dt)
 {
     WaveForceOutput out{};
     out.X = 0.0f; out.Y = 0.0f; out.Z = 0.0f; out.M = 0.0f; out.N = 0.0f;
@@ -192,10 +205,18 @@ WaveDisturbance::WaveForceOutput WaveDisturbance::waveforce_sim(
 
         for (int n = 0; n < numFreqIntervals; n++) {
             for (int m = 0; m < numDirections; m++) {
+               // 1. 计算瞬时遭遇频率
                 const float omega_enc = Omega[n] - (Omega[n] * Omega[n] / g) * U(0) * cosf(mu[m]);
-                const float phase = t * omega_enc - (Omega[n] * Omega[n] / g) * (x_pos * cosf(mu[m]) + y_pos * sinf(mu[m])) + Epsilon[n][m];
+                
+                // 2. 正确的做法：基于步长 dt 累加积分相位！(只在 j==0 也就是第一个切片时累加即可，避免重复加)
+                if (j == 0) {
+                    _wave_phase[n][m] += omega_enc * dt;
+                }
+                
+                // 3. 计算含空间衰减和分布的总相位
+                const float phase = _wave_phase[n][m] - (Omega[n] * Omega[n] / g) * (x_pos * cosf(mu[m]) + y_pos * sinf(mu[m])) + Epsilon[n][m];
                 const float atten = expf(-(Omega[n] * Omega[n] / g) * d);
-
+                
                 v_horiz      +=  Omega[n] * atten * Amp[n][m] * cosf(phase);
                 v_horiz_dot  -=  Omega[n] * Omega[n] * atten * Amp[n][m] * sinf(phase);
                 w_vert       +=  Omega[n] * atten * Amp[n][m] * sinf(phase);

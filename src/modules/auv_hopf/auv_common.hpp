@@ -314,26 +314,30 @@ inline HopfConfig default_hopf_config()
 
     cfg.surge.gamma = 1.0f;
     cfg.surge.mu = 1.0f;
-    cfg.surge.epsF = 1.0f;
-    cfg.surge.epsW = 0.5f;
-    cfg.surge.eta = 2.2f;
+    cfg.surge.epsF = 1.7f;
+    cfg.surge.epsW = 0.55f;
+    cfg.surge.eta = 1.0f;
     cfg.surge.lambda_alpha = 0.0f;
 
     cfg.sway.gamma = 1.0f;
     cfg.sway.mu = 1.0f;
-    cfg.sway.epsF = 0.7f;
+    cfg.sway.epsF = 1.7f;
     cfg.sway.epsW = 0.55f;
     cfg.sway.eta = 0.5f;
     cfg.sway.lambda_alpha = 0.0f;
 
-    cfg.yaw.gamma = 3.0f;
+    // --- Yaw 通道 (低通抗噪模式) ---
+    cfg.yaw.gamma = 1.0f;
     cfg.yaw.mu = 1.0f;
-    cfg.yaw.epsF = 0.3f;
-    cfg.yaw.epsW = 0.3f;
-    cfg.yaw.eta = 3.0f;
-    cfg.yaw.lambda_alpha = 0.06f;
+    
+    // 【解除封印】：因为有 LPF 护体，直接恢复和 Surge/Sway 一样的满血学习率！
+    cfg.yaw.epsF = 1.7f;  // 强力拉扯相位，消除滞后
+    cfg.yaw.epsW = 0.55f;
+    cfg.yaw.eta = 1.5f;   // 幅值快速膨胀，瞬间填满波峰
+    cfg.yaw.lambda_alpha = 0.0f;
 
     const float w0[N_OSC]  = {0.5f, 1.3333f, 2.1667f, 3.0f};
+    const float w_yaw[N_OSC]  = {0.5f, 1.3333f, 0.0f, 0.0f};
 
     const float xu0[N_OSC] = { 0.0291f,  0.0083f,  0.0138f, -0.0106f};
     const float yu0[N_OSC] = {-0.0047f, -0.0027f,  0.0110f, -0.0028f};
@@ -341,8 +345,10 @@ inline HopfConfig default_hopf_config()
     const float xv0[N_OSC] = { 0.0070f, -0.0205f, -0.0035f, -0.0082f};
     const float yv0[N_OSC] = {-0.0158f,  0.0051f,  0.0028f,  0.0003f};
 
-    const float xr0[N_OSC] = {-0.0133f,  0.0113f,  0.0035f, -0.0030f};
-    const float yr0[N_OSC] = { 0.0002f, -0.0026f, -0.0175f, -0.0029f};
+    // const float xr0[N_OSC] = {-0.0133f,  0.0113f,  0.0035f, -0.0030f};
+    // const float yr0[N_OSC] = { 0.0002f, -0.0026f, -0.0175f, -0.0029f};
+    const float xr0[N_OSC] = {-3.00f,  2.50f,  0.0000f,  0.0000f};
+    const float yr0[N_OSC] = { 1.00f, -1.00f,  0.0000f,  0.0000f};
 
     for (int i = 0; i < N_OSC; ++i) {
         cfg.init_surge.xi0[i] = xu0[i];
@@ -355,7 +361,7 @@ inline HopfConfig default_hopf_config()
 
         cfg.init_yaw.xi0[i] = xr0[i];
         cfg.init_yaw.yi0[i] = yr0[i];
-        cfg.init_yaw.wi0[i] = w0[i];
+        cfg.init_yaw.wi0[i] = w_yaw[i];
     }
 
     return cfg;
@@ -454,7 +460,8 @@ inline MpcWeightParams default_central_mpc_weight_params()
 {
     MpcWeightParams w{};
 
-    const float q[NX] = {8000.0f, 8000.0f, 5000.0f, 0.2f, 0.2f, 0.2f};
+   
+    const float q[NX] = {1200.0f, 1200.0f, 1200.0f, 0.2f, 0.2f, 0.2f};
     // 增加推力惩罚，阻止满舵飙车
     const float r[NU] = {2.0f, 2.0f, 5.0f};
     const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
@@ -476,10 +483,10 @@ inline MpcWeightParams default_ancillary_mpc_weight_params()
     MpcWeightParams w{};
 
     // ancillary 层相对更关注贴近 z*，同时不过度惩罚控制修正
-    const float q[NX] = {1500.0f, 1500.0f, 1000.0f, 0.5f, 0.5f, 0.5f};
-    // 推力惩罚可以低一点，允许在浪大的时候“瞬间发力”
-    const float r[NU] = {0.5f, 0.5f, 1.0f};
-    const float p[NX] = {1500.0f, 1500.0f, 1000.0f, 0.5f, 0.5f, 0.5f};
+    const float q[NX] = {1200.0f, 1200.0f, 1200.0f, 0.2f, 0.2f, 0.2f};
+    // 增加推力惩罚，阻止满舵飙车
+    const float r[NU] = {2.0f, 2.0f, 5.0f};
+    const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
 
     for (int i = 0; i < NX; ++i) {
         w.Q[i] = q[i];
@@ -609,8 +616,8 @@ inline MpcConfig default_central_mpc_config()
     MpcConfig cfg{};
 
     cfg.dt = 0.1f;
-    cfg.Thor = 1.0f;
-    cfg.Nhor = 11;
+    cfg.Thor = 1.5f;
+    cfg.Nhor = 16;
 
     cfg.MaxGradIter = 10;
     cfg.MaxMultIter = 3;

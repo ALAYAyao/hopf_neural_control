@@ -234,6 +234,15 @@ HopfObserver::InputVec HopfObserver::update(const StateVec &x, const InputVec &t
     d_raw(0) = F_surge - tau_prev(0);
     d_raw(1) = F_sway  - tau_prev(1);
     d_raw(2) = F_yaw   - tau_prev(2);
+    // static float d_raw_yaw_filtered = 0.0f;
+    // if (!_initialized) {
+    //     d_raw_yaw_filtered = d_raw(2); 
+    // }
+    // // 滤波系数 alpha = 0.1，只信任 10% 的新数据，保留 90% 的历史平滑数据
+    // d_raw_yaw_filtered = 0.9f * d_raw_yaw_filtered + 0.1f * d_raw(2);
+    
+    // // 把滤波后的干净信号喂给 Hopf
+    // d_raw(2) = d_raw_yaw_filtered;
 
     const float d_pred_u = reconstruct_disturbance(_osc_u);
     const float d_pred_v = reconstruct_disturbance(_osc_v);
