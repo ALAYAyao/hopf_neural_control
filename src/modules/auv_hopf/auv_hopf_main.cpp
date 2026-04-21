@@ -35,8 +35,10 @@
  * @brief AUV Hopf + Tube-MPC 主模块
  *
  * 当前版本定位：离线参考轨迹 + central/ancillary 两层 Tube-MPC 实现
+ 
+ 实物实验版本
  */
-
+int flg;
 class AuvHopf :
     public ModuleBase,
     public ModuleParams
