@@ -69,7 +69,11 @@ bool TelemLink::init()
 
 void TelemLink::send_string(const char *str) {
     if (_fd >= 0 && str != nullptr) {
-        ::write(_fd, str, strlen(str));
+        ssize_t bytes_written = ::write(_fd, str, strlen(str));
+        if (bytes_written < 0) {
+    // 写入失败时静默忽略，或者你可以加一句警告日志
+    // PX4_WARN("TelemLink write failed");
+        }
     }
 }
 

@@ -35,7 +35,7 @@
  * @brief AUV Hopf + Tube-MPC 主模块
  *
  * 当前版本定位：离线参考轨迹 + central/ancillary 两层 Tube-MPC 实现
- 
+
  实物实验版本
  */
 class AuvHopf :
@@ -434,8 +434,8 @@ void AuvHopf::reset_states()
     }
 
     // 初始状态对齐到离线参考轨迹起点
-    _x(0) = auv::REF_TRAJECTORY[_ref_index][1];
-    _x(1) = auv::REF_TRAJECTORY[_ref_index][2];
+    _x(0) = auv::REF_TRAJECTORY[_ref_index][1]+2;
+    _x(1) = auv::REF_TRAJECTORY[_ref_index][2]+2;
     _x(2) = auv::REF_TRAJECTORY[_ref_index][3];
     _x(3) = auv::REF_TRAJECTORY[_ref_index][4];
     _x(4) = auv::REF_TRAJECTORY[_ref_index][5];
@@ -785,6 +785,26 @@ void AuvHopf::run()
         _tau_applied = _actuator_sat.apply(_tau_anc);
         _physical_clip_norm = input_norm(_actuator_sat.debug().tau_clip);
 
+
+        char tx_buf[16];
+        //snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", (double)_tau_applied(0));
+        double stt = _tau_applied(3)*10.0f;
+        snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", stt);
+        _telem.send_string(tx_buf);
+
+        _telem.update();
+        float current_rpm = _telem.get_latest_rpm();
+
+        // --- 安全检查：判断数据是否过期 ---
+        uint64_t now_1 = hrt_absolute_time();
+        // 如果超过 500000 微秒（0.5秒）没收到新数据，认为通信断开
+        if (now_1 - _telem.get_last_rx_timestamp() > 500000) {
+            PX4_WARN("MCU Telementry timeout! RPM data is stale.");
+            // 这里可以触发 AUV 的安全保护模式，比如让电机停转，或者切换到纯位置估算模式
+            current_rpm = 0.0f;
+        }
+        // PX4_INFO("velocity: %.2f m/s", (double)current_rpm);
+        _tau_applied(3) = current_rpm / 10.0f; // 反向映射回控制输入
         // 6) 推进真实系统
         _x = _model.step(_x, _tau_applied, _d_true, dt);
         _tau_prev = _tau_applied;
@@ -807,25 +827,6 @@ void AuvHopf::run()
             _ref_index = auv::TRAJ_LENGTH - 1;
         }
         perf_end(_perf_total_run);
-
-        _telem.update();
-        float current_rpm = _telem.get_latest_rpm();
-
-        // --- 安全检查：判断数据是否过期 ---
-        uint64_t now = hrt_absolute_time();
-        // 如果超过 500000 微秒（0.5秒）没收到新数据，认为通信断开
-        if (now - _telem.get_last_rx_timestamp() > 500000) {
-            PX4_WARN("MCU Telementry timeout! RPM data is stale.");
-            // 这里可以触发 AUV 的安全保护模式，比如让电机停转，或者切换到纯位置估算模式
-            current_rpm = 0.0f; 
-        }
-         PX4_INFO("velocity: %.2f m/s", (double)current_rpm);
-
-        char tx_buf[16];
-        //snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", (double)_tau_applied(0));
-        double stt = _tau_applied(0);
-        snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", stt);
-        _telem.send_string(tx_buf);
 
         // 等待下一个采样拍
         const hrt_abstime now = hrt_absolute_time();
@@ -960,13 +961,15 @@ void AuvHopf::publish_debug(float dt)
         msg.error_x_z[i] = _x(i) - _z(i);
     }
 
-    // 2) 干扰：真实 / 学习
+    // 2) 干扰：真实 / 学习，以及实际控制量
     for (int i = 0; i < auv::NU; ++i) {
         msg.d_true[i] = _d_true(i);
         msg.d_hat[i]  = _d_hat(i);
         msg.d_res[i]  = _d_true(i) - _d_hat(i);
-    }
 
+        // 新增：把实际控制量存入 uORB 消息，以便记录到 .ulg 日志中
+        msg.tau_applied[i] = _tau_applied(i);
+    }
     // 3) 仅保留跟踪残差范数（uORB 侧最小化）
     msg.tube_tracking_error_norm = _tube_tracking_error_norm;
 
@@ -999,6 +1002,9 @@ void AuvHopf::publish_debug(float dt)
             "}, "
             "\"dist_yaw\":{"
                 "\"true\":%.3f, \"hat\":%.3f, \"res\":%.3f"
+            "}, "
+            "\"tau_applied\":{"
+                "\"u\":%.3f, \"v\":%.3f, \"r\":%.3f"
             "}"
             "}",
             (double)_x(0),    (double)_x(1),
@@ -1011,7 +1017,9 @@ void AuvHopf::publish_debug(float dt)
 
             (double)_d_true(0), (double)_d_hat(0), (double)ru,
             (double)_d_true(1), (double)_d_hat(1), (double)rv,
-            (double)_d_true(2), (double)_d_hat(2), (double)rr
+            (double)_d_true(2), (double)_d_hat(2), (double)rr,
+
+            (double)_tau_applied(0), (double)_tau_applied(1), (double)_tau_applied(2)
         );
 
         if (len > 0 && len < (int)sizeof(json_buf)) {

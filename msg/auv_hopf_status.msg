@@ -14,5 +14,6 @@ float32[3] d_true         # 真实外扰
 float32[3] d_hat          # 学习外扰
 float32[3] d_res          # 干扰学习残差 (d_true - d_hat)，按 surge/sway/yaw 三通道给出
 
+float32[3] tau_applied          #surge/sway/yaw 三通道给出
 # 核心标量指标
 float32 tube_tracking_error_norm   # 跟踪残差总范数
