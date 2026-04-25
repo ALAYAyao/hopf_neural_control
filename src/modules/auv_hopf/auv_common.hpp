@@ -415,7 +415,7 @@ inline WaveEnvParams default_wave_env_params()
     w.mu[2] =  0.5236f;
     w.mu[3] =  1.5708f;
 
-    w.d = 3.0f;
+    w.d = 1.0f;
 
     const float eps[N_WAVE_FREQ][N_WAVE_DIR] = {
         {4.6321f, 1.9052f, 4.0146f, 2.6159f},
