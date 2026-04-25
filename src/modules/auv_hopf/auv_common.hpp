@@ -329,7 +329,7 @@ inline HopfConfig default_hopf_config()
     // --- Yaw 通道 (低通抗噪模式) ---
     cfg.yaw.gamma = 1.0f;
     cfg.yaw.mu = 1.0f;
-    
+
     // 【解除封印】：因为有 LPF 护体，直接恢复和 Surge/Sway 一样的满血学习率！
     cfg.yaw.epsF = 1.7f;  // 强力拉扯相位，消除滞后
     cfg.yaw.epsW = 0.55f;
@@ -460,11 +460,15 @@ inline MpcWeightParams default_central_mpc_weight_params()
 {
     MpcWeightParams w{};
 
-   
+
     const float q[NX] = {1200.0f, 1200.0f, 1200.0f, 0.2f, 0.2f, 0.2f};
     // 增加推力惩罚，阻止满舵飙车
     const float r[NU] = {2.0f, 2.0f, 5.0f};
     const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
+//    const float q[NX] = {5.0f, 5.0f, 5.0f, 0.2f, 0.2f, 0.2f};
+//     // 增加推力惩罚，阻止满舵飙车
+//     const float r[NU] = {2.0f, 2.0f, 5.0f};
+//     const float p[NX] = {10.0f, 10.0f, 10.0f, 0.2f, 0.2f, 0.2f};
 
     for (int i = 0; i < NX; ++i) {
         w.Q[i] = q[i];

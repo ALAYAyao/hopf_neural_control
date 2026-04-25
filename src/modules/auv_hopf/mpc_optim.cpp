@@ -428,12 +428,13 @@ void lfct(typeRNum *out,
     }
 
     const double *udes = get_uref_stage(t, param, up);
+    const double *dhat = get_dhat_stage(t, param, up);
 
     for (int i = 0; i < auv::NU; ++i) {
-        const double du = u[i] - udes[i];
-        cost += 0.5 * up->R[i] * du * du;
+        // 惩罚等效输入偏差：tau + d_hat - u_ref
+        const double du_eff = (u[i] + dhat[i]) - udes[i];
+        cost += 0.5 * up->R[i] * du_eff * du_eff;
     }
-
     *out = cost;
 }
 
@@ -484,9 +485,11 @@ void dldu(typeRNum *out,
 
     const auto *up = g_up;
     const double *udes = get_uref_stage(t, param, up);
+    const double *dhat = get_dhat_stage(t, param, up);
 
     for (int i = 0; i < auv::NU; ++i) {
-        out[i] = up->R[i] * (u[i] - udes[i]);
+        const double du_eff = (u[i] + dhat[i]) - udes[i];
+        out[i] = up->R[i] * du_eff;
     }
 }
 

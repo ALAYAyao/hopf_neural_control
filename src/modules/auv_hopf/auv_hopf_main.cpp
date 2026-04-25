@@ -68,8 +68,8 @@ private:
     MpcOptim _central_mpc;
     MpcOptim _anc_mpc;
     ActuatorSaturation _actuator_sat;
-    TelemLink _telem{"/dev/ttyS1"};
-
+    //TelemLink _telem{"/dev/ttyS1"};
+    TelemLink _telem{"/dev/ttyUSB0"};
     //----------------------------------------------
     // 性能计数器
     //----------------------------------------------
@@ -770,7 +770,7 @@ void AuvHopf::run()
             _x,
             _zref_hor,
             _vref_hor,
-            _dhat_hor,
+            _dhat_hor ,
             nh_ref);
 
         perf_begin(_perf_anc_solve);
@@ -788,7 +788,7 @@ void AuvHopf::run()
 
         char tx_buf[16];
         //snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", (double)_tau_applied(0));
-        double stt = _tau_applied(3)*10.0f;
+        double stt = _tau_applied(2)*10.0f;
         snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", stt);
         _telem.send_string(tx_buf);
 
@@ -804,8 +804,8 @@ void AuvHopf::run()
             current_rpm = 0.0f;
         }
         // PX4_INFO("velocity: %.2f m/s", (double)current_rpm);
-        _tau_applied(3) = current_rpm / 10.0f; // 反向映射回控制输入
-        // 6) 推进真实系统
+        _tau_applied(2) = current_rpm / 10.0f; // 反向映射回控制输入
+        //6) 推进真实系统
         _x = _model.step(_x, _tau_applied, _d_true, dt);
         _tau_prev = _tau_applied;
 
