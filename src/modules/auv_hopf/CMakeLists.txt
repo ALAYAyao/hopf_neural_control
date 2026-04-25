@@ -5,7 +5,7 @@ px4_add_module(
     SRCS
         auv_hopf_main.cpp
         auv_model.cpp
-        hopf_observer.cpp
+        eso_observer.cpp
         wave_disturbance.cpp
         mpc_optim.cpp
         actuator_saturation.cpp

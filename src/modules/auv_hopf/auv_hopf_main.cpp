@@ -16,7 +16,7 @@
 
 #include "auv_common.hpp"
 #include "auv_model.hpp"
-#include "hopf_observer.hpp"
+#include "eso_observer.hpp"
 #include "wave_disturbance.hpp"
 #include "mpc_optim.hpp"
 #include "actuator_saturation.hpp"
@@ -32,9 +32,9 @@
 /**
  * @file auv_hopf_main.cpp
  *
- * @brief AUV Hopf + Tube-MPC 主模块
+ * @brief AUV ESO + Tube-MPC 主模块
  *
- * 当前版本定位：离线参考轨迹 + central/ancillary 两层 Tube-MPC 实现
+ * 当前版本定位：离线参考轨迹 + central/ancillary 两层 Tube-MPC + ESO 对比实验实现
 
  实物实验版本
  */
@@ -63,13 +63,12 @@ private:
     // 核心算法对象
     // --------------------------------------------------
     AuvModel _model;
-    HopfObserver _hopf;
+    EsoObserver _eso;
     WaveDisturbance _wave;
     MpcOptim _central_mpc;
     MpcOptim _anc_mpc;
     ActuatorSaturation _actuator_sat;
     TelemLink _telem{"/dev/ttyS1"};
-    //TelemLink _telem{"/dev/ttyUSB0"};
     //----------------------------------------------
     // 性能计数器
     //----------------------------------------------
@@ -142,7 +141,7 @@ private:
     float _anc_input_violation_norm{0.0f};
     float _physical_clip_norm{0.0f};
     bool _central_export_ok{false};
-    bool _hopf_preview_ok{false};
+    bool _hopf_preview_ok{false};  // ESO版本中表示 observer preview 是否有效
     bool _central_bridge_ok{true};
     bool _anc_bridge_ok{true};
 
@@ -445,7 +444,7 @@ void AuvHopf::reset_states()
     _z = _x;
 
     _wave.reset();
-    _hopf.reset();
+    _eso.reset(true);
 }
 
 /**
@@ -501,22 +500,13 @@ void AuvHopf::build_mission_reference_horizon_from_table()
 void AuvHopf::build_disturbance_preview_horizon()
 {
     const int nh = (_anc_mpc.horizon_length() > 1) ? _anc_mpc.horizon_length() : 2;
-    const float dt_preview = (_anc_mpc.sample_time() > 0.0f)
-        ? _anc_mpc.sample_time()
-        : sanitize_dt(_central_mpc.sample_time());
 
-    for (int k = 0; k < auv::NHOR_MAX; ++k) {
-        for (int i = 0; i < auv::NP; ++i) {
-            _dhat_hor[k * auv::NP + i] = 0.0f;
-        }
-    }
+    zero_horizon_buffer(_dhat_hor, auv::NP * auv::NHOR_MAX);
 
-    // 优先使用 Hopf 内模的短时信号外推：
-    //   d_hat[k+i|k] 不是“已知未来海况后的真扰动预测”，
-    //   而是把当前已学得的振子内模状态复制出来，在短预测域上做自主前滚，
-    //   从而得到供第二层使用的外生扰动预览序列。
-    //   真实海浪—AUV 耦合中未被该内模捕获的部分，仍由 residual / tube 机制吸收。
-    _hopf_preview_ok = _hopf.predict_horizon(_dhat_hor, nh, dt_preview);
+    // ESO 不具备 Hopf 振子那种可自主前滚的周期内模，
+    // 因此预测域内采用当前扰动估计的零阶保持：
+    //   d_hat[k+i|k] = d_hat[k], i = 0, ..., N_a-1.
+    _hopf_preview_ok = _eso.predict_horizon(_dhat_hor, nh);
 
     if (!_hopf_preview_ok) {
         for (int k = 0; k < nh && k < auv::NHOR_MAX; ++k) {
@@ -524,12 +514,12 @@ void AuvHopf::build_disturbance_preview_horizon()
             _dhat_hor[k * auv::NP + 1] = _d_hat(1);
             _dhat_hor[k * auv::NP + 2] = _d_hat(2);
         }
-    }
 
-    for (int k = nh; k < auv::NHOR_MAX; ++k) {
-        _dhat_hor[k * auv::NP + 0] = _dhat_hor[(nh - 1) * auv::NP + 0];
-        _dhat_hor[k * auv::NP + 1] = _dhat_hor[(nh - 1) * auv::NP + 1];
-        _dhat_hor[k * auv::NP + 2] = _dhat_hor[(nh - 1) * auv::NP + 2];
+        for (int k = nh; k < auv::NHOR_MAX; ++k) {
+            _dhat_hor[k * auv::NP + 0] = _d_hat(0);
+            _dhat_hor[k * auv::NP + 1] = _d_hat(1);
+            _dhat_hor[k * auv::NP + 2] = _d_hat(2);
+        }
     }
 
     _preview_update_norm = 0.0f;
@@ -537,16 +527,16 @@ void AuvHopf::build_disturbance_preview_horizon()
         const float du = _dhat_hor[k * auv::NP + 0] - _dhat_prev_hor[k * auv::NP + 0];
         const float dv = _dhat_hor[k * auv::NP + 1] - _dhat_prev_hor[k * auv::NP + 1];
         const float dr = _dhat_hor[k * auv::NP + 2] - _dhat_prev_hor[k * auv::NP + 2];
+
         const float delta = sqrtf(du * du + dv * dv + dr * dr);
+
         if (delta > _preview_update_norm) {
             _preview_update_norm = delta;
         }
     }
 
-    const float dspan_u = _dhat_hor[(nh - 1) * auv::NP + 0] - _dhat_hor[0];
-    const float dspan_v = _dhat_hor[(nh - 1) * auv::NP + 1] - _dhat_hor[1];
-    const float dspan_r = _dhat_hor[(nh - 1) * auv::NP + 2] - _dhat_hor[2];
-    _preview_span_norm = sqrtf(dspan_u * dspan_u + dspan_v * dspan_v + dspan_r * dspan_r);
+    // ZOH 预测下，预测域首末扰动相同。
+    _preview_span_norm = 0.0f;
 
     for (int i = 0; i < auv::NP * auv::NHOR_MAX; ++i) {
         _dhat_prev_hor[i] = _dhat_hor[i];
@@ -643,8 +633,8 @@ bool AuvHopf::init()
 
     _model.set_plant_params(bundle.plant);
 
-    _hopf.set_plant_params(bundle.plant);
-    _hopf.set_hopf_config(bundle.hopf);
+    _eso.set_plant_params(bundle.plant);
+    _eso.set_bandwidth(bundle.eso.omega_o);
 
     _wave.set_wave_env(bundle.wave_env);
     _wave.set_model_params(bundle.wave_model);
@@ -734,9 +724,9 @@ void AuvHopf::run()
         build_mission_reference_from_table();
         build_mission_reference_horizon_from_table();
 
-        // 2) 真实扰动 / Hopf 学习 / 预览
+        // 2) 真实扰动 / ESO 观测 / 零阶保持预览
         _d_true = _wave.step(_x, _sim_time);
-        _d_hat  = _hopf.update(_x, _tau_prev, dt);
+        _d_hat  = _eso.update(_x, _tau_prev, dt);
         _disturbance_residual_norm = input_norm(_d_true - _d_hat);
 
         build_disturbance_preview_horizon();
@@ -761,7 +751,7 @@ void AuvHopf::run()
         build_central_rollout_horizon();
         sync_nominal_from_plan_head();
 
-        // 4) 第二层：每拍跟踪 central path，并注入 Hopf 预览
+        // 4) 第二层：每拍跟踪 central path，并注入 ESO 零阶保持扰动预览
         const int nh_ref = (_anc_mpc.horizon_length() < _xref_nhor)
                         ? _anc_mpc.horizon_length()
                         : _xref_nhor;
@@ -770,7 +760,7 @@ void AuvHopf::run()
             _x,
             _zref_hor,
             _vref_hor,
-            _dzero_hor ,
+            _dhat_hor ,
             nh_ref);
 
         perf_begin(_perf_anc_solve);
@@ -787,6 +777,7 @@ void AuvHopf::run()
 
 
         char tx_buf[16];
+        //snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", (double)_tau_applied(0));
         double stt = _tau_applied(2)*10.0f;
         snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", stt);
         _telem.send_string(tx_buf);
@@ -922,16 +913,16 @@ int AuvHopf::print_usage(const char *reason)
     PRINT_MODULE_DESCRIPTION(
         R"DESCR_STR(
 ### Description
-AUV Hopf + Tube-MPC composite control module.
+AUV ESO + Tube-MPC comparison control module.
 
 Current version runs a cleaned two-layer architecture internally:
-wave disturbance -> Hopf learner -> central-path MPC -> Hopf-augmented ancillary MPC -> physical saturation -> plant update
+wave disturbance -> ESO observer -> central-path MPC -> ESO-augmented ancillary MPC -> physical saturation -> plant update
 
 Key property of this version:
 - mission reference is no longer treated as the central path itself
 - central state z is generated by a dedicated nominal OCP
 - ancillary layer explicitly tracks z* / v* and uses disturbance preview
-- Hopf preview is generated by autonomous oscillator rollout instead of ZOH replication
+- ESO disturbance preview is generated by zero-order hold of the current estimate
 - actuator_saturation is now the dedicated physical layer object
 - runtime parameters are loaded through a named profile bundle: engineering_default
 - debug stream is minimized to trajectory / disturbance-learning essentials

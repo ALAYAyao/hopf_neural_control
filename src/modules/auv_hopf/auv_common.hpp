@@ -3,14 +3,19 @@
 /**
  * @file auv_common.hpp
  *
- * @brief AUV Hopf + Tube-MPC 项目的公共类型、参数与默认配置
+ * @brief AUV Hopf / ESO + Tube-MPC 项目的公共类型、参数与默认配置
  *
  * 本文件是整个项目的统一公共入口，负责集中定义：
  * 1. 基本维度与公共向量类型
  * 2. AUV 名义动力学参数
  * 3. Hopf 学习器参数
- * 4. 波浪环境与波浪力模型参数
+ * 4. ESO 观测器参数
+ * 5. 波浪环境与波浪力模型参数
  * 6. MPC / GRAMPC 参数、约束与默认配置
+ *
+ * 说明：
+ * - 为了保证 Hopf 与 ESO 对比实验公平，plant / wave / actuator / MPC 参数保持完全一致。
+ * - ESO 只额外增加自身带宽 omega_o，不改变原工程参数口径。
  *
  * 状态:
  *   x = [X, Y, psi, u, v, r]
@@ -92,6 +97,20 @@ struct HopfConfig {
     HopfChannelInit init_surge;
     HopfChannelInit init_sway;
     HopfChannelInit init_yaw;
+};
+
+// ==================================================
+// ESO 观测器参数
+// ==================================================
+
+/**
+ * @brief ESO 对比实验参数
+ *
+ * 仅用于配置 LESO 带宽，不改变 plant / wave / MPC / actuator 参数。
+ * 这样 Hopf 与 ESO 对比实验只替换 disturbance observer / preview mechanism。
+ */
+struct EsoConfig {
+    float omega_o;
 };
 
 // ==================================================
@@ -182,13 +201,6 @@ enum class ParameterProfile : uint8_t {
     EngineeringDefault = 0,
 };
 
-/**
- * @brief 主模块一次性装载的参数包
- *
- * 当前统一由一套工程默认参数集中装载，避免主模块从多个默认工厂零散拼装，
- * 导致参数口径漂移。
- */
-
 // ==================================================
 // MPC / GRAMPC 参数
 // ==================================================
@@ -264,11 +276,18 @@ struct MissionReferenceParams {
     int ref_stride;
 };
 
+/**
+ * @brief 主模块一次性装载的参数包
+ *
+ * 当前统一由一套工程默认参数集中装载，避免主模块从多个默认工厂零散拼装，
+ * 导致参数口径漂移。
+ */
 struct RuntimeProfileBundle {
     const char *profile_name;
 
     AuvPlantParams plant;
     HopfConfig hopf;
+    EsoConfig eso;
     WaveEnvParams wave_env;
     WaveForceModelParams wave_model;
 
@@ -330,14 +349,14 @@ inline HopfConfig default_hopf_config()
     cfg.yaw.gamma = 1.0f;
     cfg.yaw.mu = 1.0f;
 
-    // 【解除封印】：因为有 LPF 护体，直接恢复和 Surge/Sway 一样的满血学习率！
-    cfg.yaw.epsF = 1.7f;  // 强力拉扯相位，消除滞后
+    // 因为有 LPF 护体，直接恢复和 Surge/Sway 一样的满血学习率。
+    cfg.yaw.epsF = 1.7f;
     cfg.yaw.epsW = 0.55f;
-    cfg.yaw.eta = 1.5f;   // 幅值快速膨胀，瞬间填满波峰
+    cfg.yaw.eta = 1.5f;
     cfg.yaw.lambda_alpha = 0.0f;
 
-    const float w0[N_OSC]  = {0.5f, 1.3333f, 2.1667f, 3.0f};
-    const float w_yaw[N_OSC]  = {0.5f, 1.3333f, 0.0f, 0.0f};
+    const float w0[N_OSC]     = {0.5f, 1.3333f, 2.1667f, 3.0f};
+    const float w_yaw[N_OSC] = {0.5f, 1.3333f, 0.0f, 0.0f};
 
     const float xu0[N_OSC] = { 0.0291f,  0.0083f,  0.0138f, -0.0106f};
     const float yu0[N_OSC] = {-0.0047f, -0.0027f,  0.0110f, -0.0028f};
@@ -345,8 +364,6 @@ inline HopfConfig default_hopf_config()
     const float xv0[N_OSC] = { 0.0070f, -0.0205f, -0.0035f, -0.0082f};
     const float yv0[N_OSC] = {-0.0158f,  0.0051f,  0.0028f,  0.0003f};
 
-    // const float xr0[N_OSC] = {-0.0133f,  0.0113f,  0.0035f, -0.0030f};
-    // const float yr0[N_OSC] = { 0.0002f, -0.0026f, -0.0175f, -0.0029f};
     const float xr0[N_OSC] = {-3.00f,  2.50f,  0.0000f,  0.0000f};
     const float yr0[N_OSC] = { 1.00f, -1.00f,  0.0000f,  0.0000f};
 
@@ -363,6 +380,16 @@ inline HopfConfig default_hopf_config()
         cfg.init_yaw.yi0[i] = yr0[i];
         cfg.init_yaw.wi0[i] = w_yaw[i];
     }
+
+    return cfg;
+}
+
+inline EsoConfig default_eso_config()
+{
+    EsoConfig cfg{};
+
+    // 与 MATLAB LESO 形式一致的默认带宽；只影响 ESO，对 Hopf 工程参数无影响。
+    cfg.omega_o = 5.0f;
 
     return cfg;
 }
@@ -410,7 +437,7 @@ inline WaveForceModelParams default_wave_force_model_params()
 {
     WaveForceModelParams p{};
 
-// --- 物理常数 ---
+    // --- 物理常数 ---
     p.rho = 1025.0f;           // 海水密度 (淡水测试请改为 1000.0f)
     p.g   = 9.81f;             // 重力加速度
 
@@ -421,11 +448,12 @@ inline WaveForceModelParams default_wave_force_model_params()
     // --- 水动力学特征 ---
     p.cd  = 1.0f;              // 框架式 AUV 阻力较大
     p.cm1 = 0.15f;             // 纵向附加质量系数较小
-    p.cm2 = 0.9f;              // 横向附加质量系数较大 (接近圆柱横截面)
+    p.cm2 = 0.9f;              // 横向附加惯性相关系数较大 (接近圆柱横截面)
 
     // --- 算法参数 ---
     p.h = p.L / 10.0f;         // 离散步长 0.05m (分成 10 个切片)
     p.scale_factor = 1.0f;     // 初始波浪扰动缩放保持原样
+
     return p;
 }
 
@@ -439,7 +467,6 @@ inline PhysicalActuatorLimits default_physical_actuator_limits()
 
     return p;
 }
-
 
 inline MissionReferenceParams default_mission_reference_params()
 {
@@ -460,15 +487,9 @@ inline MpcWeightParams default_central_mpc_weight_params()
 {
     MpcWeightParams w{};
 
-
     const float q[NX] = {1200.0f, 1200.0f, 1200.0f, 0.2f, 0.2f, 0.2f};
-    // 增加推力惩罚，阻止满舵飙车
     const float r[NU] = {2.0f, 2.0f, 5.0f};
     const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
-//    const float q[NX] = {5.0f, 5.0f, 5.0f, 0.2f, 0.2f, 0.2f};
-//     // 增加推力惩罚，阻止满舵飙车
-//     const float r[NU] = {2.0f, 2.0f, 5.0f};
-//     const float p[NX] = {10.0f, 10.0f, 10.0f, 0.2f, 0.2f, 0.2f};
 
     for (int i = 0; i < NX; ++i) {
         w.Q[i] = q[i];
@@ -488,7 +509,6 @@ inline MpcWeightParams default_ancillary_mpc_weight_params()
 
     // ancillary 层相对更关注贴近 z*，同时不过度惩罚控制修正
     const float q[NX] = {1200.0f, 1200.0f, 1200.0f, 0.2f, 0.2f, 0.2f};
-    // 增加推力惩罚，阻止满舵飙车
     const float r[NU] = {2.0f, 2.0f, 5.0f};
     const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
 
@@ -504,6 +524,16 @@ inline MpcWeightParams default_ancillary_mpc_weight_params()
     return w;
 }
 
+inline void set_default_disturbance_parameter_bounds(MpcBoundsParams &b)
+{
+    // GRAMPC 的 p = [d_u, d_v, d_r] 作为外生扰动估计序列传入。
+    // 当前代码主要通过 dhat_hor 使用扰动，不主动优化 p。
+    // 这里显式给出宽边界，避免未初始化边界影响求解器。
+    b.pmin[0] = -500.0f; b.pmax[0] = 500.0f;
+    b.pmin[1] = -500.0f; b.pmax[1] = 500.0f;
+    b.pmin[2] = -500.0f; b.pmax[2] = 500.0f;
+}
+
 inline MpcBoundsParams default_central_mpc_bounds_params()
 {
     MpcBoundsParams b{};
@@ -513,6 +543,8 @@ inline MpcBoundsParams default_central_mpc_bounds_params()
     b.umin[1] = -35.0f; b.umax[1] =  35.0f;
     b.umin[2] =  -9.0f; b.umax[2] =   9.0f;
 
+    set_default_disturbance_parameter_bounds(b);
+
     return b;
 }
 
@@ -520,12 +552,14 @@ inline MpcBoundsParams default_ancillary_mpc_bounds_params()
 {
     MpcBoundsParams b{};
 
-  // --- 1. 控制器输出约束 (umin / umax) ---
-    // ancillary 层直接面对真实状态，它的约束需要比 nominal 层（48, 32, 9）更宽。
-    // 我们将其设置在非常接近物理极限（60, 40, 12）的位置，留下最后一点防饱和余量。
+    // ancillary 层直接面对真实状态，它的约束需要比 nominal 层更宽。
+    // 设置在接近物理极限的位置，留下最后一点防饱和余量。
     b.umin[0] = -55.0f; b.umax[0] =  55.0f;
     b.umin[1] = -45.0f; b.umax[1] =  45.0f;
     b.umin[2] = -11.0f; b.umax[2] =  11.0f;
+
+    set_default_disturbance_parameter_bounds(b);
+
     return b;
 }
 
@@ -548,31 +582,23 @@ inline MpcStateBoundsParams default_central_state_bounds_params()
     MpcStateBoundsParams b = default_mpc_state_bounds_params();
     b.enable_soft_bounds = true;
 
-   // --- 1. 绝对坐标与姿态 (X, Y, psi) ---
+    // --- 1. 绝对坐标与姿态 (X, Y, psi) ---
     // AUV 需要全海域航行（X/Y无界），并且要能画整圆（psi无界）。
-    // 将惩罚设为 0，意味着解除状态空间绝对位置的软约束。
-    // (让 MPC 的 Q 矩阵专注于消除与参考点的“相对误差”，而不是限制绝对坐标)
-    b.penalty[0] = 0.0f; // X 不限
-    b.penalty[1] = 0.0f; // Y 不限
-    b.penalty[2] = 0.0f; // psi 不限 (重点修复：允许自由打转和画圆！)
+    b.penalty[0] = 0.0f;
+    b.penalty[1] = 0.0f;
+    b.penalty[2] = 0.0f;
 
     // --- 2. 纵向速度 (u) ---
-    // 小型 AUV 的安全巡航速度通常在 1.0 m/s 左右。
-    // 这里限制名义层最高规划速度为 1.2 m/s，确保电机绝对能达标。
     b.xmin[3] = -1.20f;
     b.xmax[3] =  1.20f;
     b.penalty[3] = 250.0f;
 
     // --- 3. 横向速度 (v) ---
-    // 全驱 AUV 虽然能横向平移，但横向迎流面积大，阻力极大。
-    // 限制最高横移速度为 0.8 m/s，防止规划出不切实际的侧滑轨迹。
     b.xmin[4] = -0.80f;
     b.xmax[4] =  0.80f;
     b.penalty[4] = 250.0f;
 
     // --- 4. 艏摇角速度 (r) ---
-    // 限制在 1.0 rad/s (约 57度/秒)。
-    // 这个速度足够灵活，同时又能防止 AUV 像陀螺一样疯转导致传感器(IMU)晕眩。
     b.xmin[5] = -1.00f;
     b.xmax[5] =  1.00f;
     b.penalty[5] = 200.0f;
@@ -585,29 +611,22 @@ inline MpcStateBoundsParams default_ancillary_state_bounds_params()
     MpcStateBoundsParams b = default_mpc_state_bounds_params();
     b.enable_soft_bounds = true;
 
-  // --- 1. 位置与姿态 (X, Y, psi) ---
-    // 和名义层一样，绝对不限制全局坐标和航向角，允许 AUV 满世界跑和自由画整圆。
+    // --- 1. 位置与姿态 (X, Y, psi) ---
     b.penalty[0] = 0.0f;
     b.penalty[1] = 0.0f;
-    b.penalty[2] = 0.0f; // 彻底解除画圆时的 180度/pi 封印
+    b.penalty[2] = 0.0f;
 
     // --- 2. 纵向速度 (u) 物理极限防线 ---
-    // 名义层限速是 1.2m/s。
-    // 这里允许遇到大浪时，瞬间被推到 1.5m/s。但超过 1.5m/s 就必须遭受重罚拉回！
     b.xmin[3] = -1.50f;
     b.xmax[3] =  1.50f;
     b.penalty[3] = 300.0f;
 
     // --- 3. 横向速度 (v) 物理极限防线 ---
-    // 名义层规划横移最大 0.8m/s。
-    // 真实情况横向受流面积大，允许瞬间漂移到 1.2m/s。
     b.xmin[4] = -1.20f;
     b.xmax[4] =  1.20f;
     b.penalty[4] = 300.0f;
 
     // --- 4. 艏摇角速度 (r) 物理极限防线 ---
-    // 名义层转弯角速度最大 1.0 rad/s。
-    // 允许瞬间被海浪拍转到 1.5 rad/s (约85度/秒)，再大就要出安全事故了。
     b.xmin[5] = -1.50f;
     b.xmax[5] =  1.50f;
     b.penalty[5] = 250.0f;
@@ -656,6 +675,7 @@ inline RuntimeProfileBundle make_runtime_profile_bundle()
 
     bundle.plant = default_plant_params();
     bundle.hopf = default_hopf_config();
+    bundle.eso = default_eso_config();
     bundle.wave_env = default_wave_env_params();
     bundle.wave_model = default_wave_force_model_params();
 
@@ -701,6 +721,5 @@ inline MpcConfig default_mpc_config()
 {
     return default_ancillary_mpc_config();
 }
-
 
 } // namespace auv
