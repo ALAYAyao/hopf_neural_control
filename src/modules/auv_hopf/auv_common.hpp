@@ -314,14 +314,14 @@ inline HopfConfig default_hopf_config()
 
     cfg.surge.gamma = 1.0f;
     cfg.surge.mu = 1.0f;
-    cfg.surge.epsF = 1.7f;
+    cfg.surge.epsF = 1.5f;
     cfg.surge.epsW = 0.55f;
     cfg.surge.eta = 1.0f;
-    cfg.surge.lambda_alpha = 0.0f;
+    cfg.surge.lambda_alpha = 0.05f;
 
     cfg.sway.gamma = 1.0f;
     cfg.sway.mu = 1.0f;
-    cfg.sway.epsF = 1.7f;
+    cfg.sway.epsF = 1.3f;
     cfg.sway.epsW = 0.55f;
     cfg.sway.eta = 0.5f;
     cfg.sway.lambda_alpha = 0.0f;
@@ -331,10 +331,10 @@ inline HopfConfig default_hopf_config()
     cfg.yaw.mu = 1.0f;
 
     // 【解除封印】：因为有 LPF 护体，直接恢复和 Surge/Sway 一样的满血学习率！
-    cfg.yaw.epsF = 1.7f;  // 强力拉扯相位，消除滞后
+    cfg.yaw.epsF = 1.2f;  // 强力拉扯相位，消除滞后
     cfg.yaw.epsW = 0.55f;
     cfg.yaw.eta = 1.5f;   // 幅值快速膨胀，瞬间填满波峰
-    cfg.yaw.lambda_alpha = 0.0f;
+    cfg.yaw.lambda_alpha = 0.01f;
 
     const float w0[N_OSC]  = {0.5f, 1.3333f, 2.1667f, 3.0f};
     const float w_yaw[N_OSC]  = {0.5f, 1.3333f, 0.0f, 0.0f};
@@ -388,7 +388,7 @@ inline WaveEnvParams default_wave_env_params()
     w.mu[2] =  0.5236f;
     w.mu[3] =  1.5708f;
 
-    w.d = 3.0f;
+    w.d = 1.0f;
 
     const float eps[N_WAVE_FREQ][N_WAVE_DIR] = {
         {4.6321f, 1.9052f, 4.0146f, 2.6159f},

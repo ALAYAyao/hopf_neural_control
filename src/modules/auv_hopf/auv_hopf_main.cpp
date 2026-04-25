@@ -770,7 +770,7 @@ void AuvHopf::run()
             _x,
             _zref_hor,
             _vref_hor,
-            _dzero_hor ,
+            _dhat_hor ,
             nh_ref);
 
         perf_begin(_perf_anc_solve);
@@ -787,7 +787,7 @@ void AuvHopf::run()
 
 
         char tx_buf[16];
-        double stt = _tau_applied(2)*10.0f;
+        double stt = _tau_applied(2)*6.0f;
         snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", stt);
         _telem.send_string(tx_buf);
 
@@ -803,7 +803,7 @@ void AuvHopf::run()
             current_rpm = 0.0f;
         }
         // PX4_INFO("velocity: %.2f m/s", (double)current_rpm);
-        _tau_applied(2) = current_rpm / 10.0f; // 反向映射回控制输入
+        _tau_applied(2) = current_rpm / 6.0f; // 反向映射回控制输入
         //6) 推进真实系统
         _x = _model.step(_x, _tau_applied, _d_true, dt);
         _tau_prev = _tau_applied;
