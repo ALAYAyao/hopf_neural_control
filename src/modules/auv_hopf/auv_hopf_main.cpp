@@ -737,6 +737,9 @@ void AuvHopf::run()
         // 2) 真实扰动 / Hopf 学习 / 预览
         _d_true = _wave.step(_x, _sim_time);
         _d_hat  = _hopf.update(_x, _tau_prev, dt);
+
+        _d_true(2) *= 0.01f;
+        _d_hat(2)  *= 0.01f;
         _disturbance_residual_norm = input_norm(_d_true - _d_hat);
 
         build_disturbance_preview_horizon();
@@ -787,7 +790,7 @@ void AuvHopf::run()
 
 
         char tx_buf[16];
-        double stt = _tau_applied(2)*6.0f;
+        double stt = _tau_applied(2)*5.0f;
         snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", stt);
         _telem.send_string(tx_buf);
 
@@ -803,7 +806,7 @@ void AuvHopf::run()
             current_rpm = 0.0f;
         }
         // PX4_INFO("velocity: %.2f m/s", (double)current_rpm);
-        _tau_applied(2) = current_rpm / 6.0f; // 反向映射回控制输入
+        _tau_applied(2) = current_rpm / 5.0f; // 反向映射回控制输入
         //6) 推进真实系统
         _x = _model.step(_x, _tau_applied, _d_true, dt);
         _tau_prev = _tau_applied;

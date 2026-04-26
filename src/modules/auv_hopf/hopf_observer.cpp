@@ -233,14 +233,14 @@ HopfObserver::InputVec HopfObserver::update(const StateVec &x, const InputVec &t
     InputVec d_raw;
     d_raw(0) = F_surge - tau_prev(0);
     d_raw(1) = F_sway  - tau_prev(1);
-    d_raw(2) = F_yaw   - tau_prev(2);
+    d_raw(2) = (F_yaw   - tau_prev(2))*100.0f; // 因为 yaw 通道的扰动被大幅衰减了，所以在喂给 Hopf 前先放大 100 倍，让它更容易学习和捕获 yaw 方向的扰动特征。
     // static float d_raw_yaw_filtered = 0.0f;
     // if (!_initialized) {
-    //     d_raw_yaw_filtered = d_raw(2); 
+    //     d_raw_yaw_filtered = d_raw(2);
     // }
     // // 滤波系数 alpha = 0.1，只信任 10% 的新数据，保留 90% 的历史平滑数据
     // d_raw_yaw_filtered = 0.9f * d_raw_yaw_filtered + 0.1f * d_raw(2);
-    
+
     // // 把滤波后的干净信号喂给 Hopf
     // d_raw(2) = d_raw_yaw_filtered;
 
