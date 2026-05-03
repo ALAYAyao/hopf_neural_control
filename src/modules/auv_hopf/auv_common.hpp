@@ -338,6 +338,7 @@ inline HopfConfig default_hopf_config()
 
     const float w0[N_OSC]  = {0.5f, 1.3333f, 2.1667f, 3.0f};
     const float w_yaw[N_OSC]  = {0.5f, 1.3333f, 0.0f, 0.0f};
+   // const float w_surge[N_OSC]  = {0.5f, 1.3333f, 2.1667f, 0.0f};
 
     const float xu0[N_OSC] = { 0.0291f,  0.0083f,  0.0138f, -0.0106f};
     const float yu0[N_OSC] = {-0.0047f, -0.0027f,  0.0110f, -0.0028f};
