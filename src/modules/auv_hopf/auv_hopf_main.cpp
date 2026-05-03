@@ -738,8 +738,8 @@ void AuvHopf::run()
         _d_true = _wave.step(_x, _sim_time);
         _d_hat  = _hopf.update(_x, _tau_prev, dt);
 
-        _d_true(2) *= 0.01f;
-        _d_hat(2)  *= 0.01f;
+        // _d_true(2) *= 0.01f;
+        // _d_hat(2)  *= 0.01f;
         _disturbance_residual_norm = input_norm(_d_true - _d_hat);
 
         build_disturbance_preview_horizon();
@@ -773,7 +773,7 @@ void AuvHopf::run()
             _x,
             _zref_hor,
             _vref_hor,
-            _dhat_hor ,
+            _dzero_hor ,
             nh_ref);
 
         perf_begin(_perf_anc_solve);
@@ -789,26 +789,26 @@ void AuvHopf::run()
         _physical_clip_norm = input_norm(_actuator_sat.debug().tau_clip);
 
 
-        char tx_buf[16];
-        double stt = _tau_applied(2)*5.0f;
-        snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", stt);
-        _telem.send_string(tx_buf);
+        // char tx_buf[16];
+        // double stt = _tau_applied(2)*5.0f;
+        // snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", stt);
+        // _telem.send_string(tx_buf);
 
-        _telem.update();
-        float current_rpm = _telem.get_latest_rpm();
+        // _telem.update();
+        // float current_rpm = _telem.get_latest_rpm();
 
-        // --- 安全检查：判断数据是否过期 ---
-        uint64_t now_1 = hrt_absolute_time();
-        // 如果超过 500000 微秒（0.5秒）没收到新数据，认为通信断开
-        if (now_1 - _telem.get_last_rx_timestamp() > 500000) {
-            PX4_WARN("MCU Telementry timeout! RPM data is stale.");
-            // 这里可以触发 AUV 的安全保护模式，比如让电机停转，或者切换到纯位置估算模式
-            current_rpm = 0.0f;
-        }
-        // PX4_INFO("velocity: %.2f m/s", (double)current_rpm);
-        _tau_applied(2) = current_rpm / 5.0f; // 反向映射回控制输入
+        // // --- 安全检查：判断数据是否过期 ---
+        // uint64_t now_1 = hrt_absolute_time();
+        // // 如果超过 500000 微秒（0.5秒）没收到新数据，认为通信断开
+        // if (now_1 - _telem.get_last_rx_timestamp() > 500000) {
+        //     PX4_WARN("MCU Telementry timeout! RPM data is stale.");
+        //     // 这里可以触发 AUV 的安全保护模式，比如让电机停转，或者切换到纯位置估算模式
+        //     current_rpm = 0.0f;
+        // }
+        // // PX4_INFO("velocity: %.2f m/s", (double)current_rpm);
+        // _tau_applied(2) = current_rpm / 5.0f; // 反向映射回控制输入
         //6) 推进真实系统
-        _x = _model.step(_x, _tau_applied, _d_true, dt);
+        _x = _model.step(_x, _tau_applied, _d_true*0, dt);
         _tau_prev = _tau_applied;
 
         // 7) 指标

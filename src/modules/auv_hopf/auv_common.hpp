@@ -486,7 +486,6 @@ inline MpcWeightParams default_ancillary_mpc_weight_params()
 {
     MpcWeightParams w{};
 
-    // ancillary 层相对更关注贴近 z*，同时不过度惩罚控制修正
     const float q[NX] = {1200.0f, 1200.0f, 1200.0f, 0.2f, 0.2f, 0.2f};
     // 增加推力惩罚，阻止满舵飙车
     const float r[NU] = {2.0f, 2.0f, 5.0f};
@@ -638,8 +637,8 @@ inline MpcConfig default_ancillary_mpc_config()
 
     // 当前先保持同采样周期/时域长度，后续可独立加快 ancillary 频率。
     cfg.dt = 0.1f;
-    cfg.Thor = 1.0f;
-    cfg.Nhor = 11;
+    cfg.Thor = 1.5f;
+    cfg.Nhor = 16;
     cfg.MaxGradIter = 10;
     cfg.MaxMultIter = 3;
     cfg.shift_control = true;
