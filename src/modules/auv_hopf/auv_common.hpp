@@ -489,7 +489,7 @@ inline MpcWeightParams default_ancillary_mpc_weight_params()
 
     const float q[NX] = {1200.0f, 1200.0f, 1200.0f, 0.2f, 0.2f, 0.2f};
     // 增加推力惩罚，阻止满舵飙车
-    const float r[NU] = {2.0f, 2.0f, 5.0f};
+    const float r[NU] = {5.0f, 5.0f, 5.0f};
     const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
 
     for (int i = 0; i < NX; ++i) {

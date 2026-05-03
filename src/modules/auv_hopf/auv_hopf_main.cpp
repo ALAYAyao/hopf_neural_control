@@ -776,7 +776,7 @@ void AuvHopf::run()
             _x,
             _zref_hor,
             _vref_hor,
-            _dzero_hor ,
+            _dhat_hor ,
             nh_ref);
 
         perf_begin(_perf_anc_solve);
