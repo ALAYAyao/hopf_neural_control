@@ -17,3 +17,5 @@ float32[3] d_res          # 干扰学习残差 (d_true - d_hat)，按 surge/sway
 float32[3] tau_applied          #surge/sway/yaw 三通道给出
 # 核心标量指标
 float32 tube_tracking_error_norm   # 跟踪残差总范数
+float32 control_effort_instant  # 瞬时控制努力 ||tau||^2
+float32 control_effort_accum    # 累积能量消耗

@@ -487,9 +487,9 @@ inline MpcWeightParams default_central_mpc_weight_params()
 {
     MpcWeightParams w{};
 
-    const float q[NX] = {1200.0f, 1200.0f, 1200.0f, 0.2f, 0.2f, 0.2f};
-    const float r[NU] = {2.0f, 2.0f, 5.0f};
-    const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
+    const float q[NX] = {800.0f, 800.0f, 600.0f, 20.0f, 20.0f, 10.0f};
+    const float r[NU] = {5.0f, 5.0f, 8.0f};
+    const float p[NX] = {5000.0f, 5000.0f, 3000.0f, 100.0f, 100.0f, 50.0f};
 
     for (int i = 0; i < NX; ++i) {
         w.Q[i] = q[i];
@@ -507,10 +507,9 @@ inline MpcWeightParams default_ancillary_mpc_weight_params()
 {
     MpcWeightParams w{};
 
-    // ancillary 层相对更关注贴近 z*，同时不过度惩罚控制修正
-    const float q[NX] = {1200.0f, 1200.0f, 1200.0f, 0.2f, 0.2f, 0.2f};
-    const float r[NU] = {2.0f, 2.0f, 5.0f};
-    const float p[NX] = {800.0f, 800.0f, 500.0f, 0.2f, 0.2f, 0.2f};
+    const float q[NX] = {2500.0f, 2500.0f, 2000.0f, 80.0f, 80.0f, 40.0f};
+    const float r[NU] = {0.8f, 0.8f, 1.5f};
+    const float p[NX] = {8000.0f, 8000.0f, 5000.0f, 200.0f, 200.0f, 100.0f};
 
     for (int i = 0; i < NX; ++i) {
         w.Q[i] = q[i];
@@ -659,7 +658,7 @@ inline MpcConfig default_ancillary_mpc_config()
     cfg.dt = 0.1f;
     cfg.Thor = 1.0f;
     cfg.Nhor = 11;
-    cfg.MaxGradIter = 10;
+    cfg.MaxGradIter = 30;
     cfg.MaxMultIter = 3;
     cfg.shift_control = true;
     cfg.use_terminal_cost = true;

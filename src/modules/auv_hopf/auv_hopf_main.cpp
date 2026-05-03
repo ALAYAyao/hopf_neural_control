@@ -145,6 +145,10 @@ private:
     bool _central_bridge_ok{true};
     bool _anc_bridge_ok{true};
 
+    float _control_effort_instant{0.0f}; // 瞬时功耗
+    float _control_effort_accum{0.0f};   // 累积功耗
+
+
     // 调试输出
     uORB::Publication<auv_hopf_status_s> _status_pub{ORB_ID(auv_hopf_status)};
 
@@ -776,6 +780,14 @@ void AuvHopf::run()
         _physical_clip_norm = input_norm(_actuator_sat.debug().tau_clip);
 
 
+        // --- 新增：计算控制努力 ---
+        _control_effort_instant = _tau_applied(0)*_tau_applied(0) +
+                                  _tau_applied(1)*_tau_applied(1) +
+                                  _tau_applied(2)*_tau_applied(2);
+
+        _control_effort_accum += _control_effort_instant * dt;
+
+
         char tx_buf[16];
         //snprintf(tx_buf, sizeof(tx_buf), "T%.1f\r\n", (double)_tau_applied(0));
         double stt = _tau_applied(2)*10.0f;
@@ -795,6 +807,7 @@ void AuvHopf::run()
         }
         // PX4_INFO("velocity: %.2f m/s", (double)current_rpm);
         _tau_applied(2) = current_rpm / 10.0f; // 反向映射回控制输入
+
         //6) 推进真实系统
         _x = _model.step(_x, _tau_applied, _d_true, dt);
         _tau_prev = _tau_applied;
@@ -962,6 +975,10 @@ void AuvHopf::publish_debug(float dt)
     }
     // 3) 仅保留跟踪残差范数（uORB 侧最小化）
     msg.tube_tracking_error_norm = _tube_tracking_error_norm;
+
+    // 把刚刚算好的成员变量赋给 uORB 消息
+    msg.control_effort_instant = _control_effort_instant;
+    msg.control_effort_accum = _control_effort_accum;
 
     _status_pub.publish(msg);
 
